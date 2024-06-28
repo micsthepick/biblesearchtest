@@ -1,0 +1,3 @@
+[submodule "Bible-kjv"]
+	path = Bible-kjv
+	url = git@github.com:micsthepick/Bible-kjv.git
