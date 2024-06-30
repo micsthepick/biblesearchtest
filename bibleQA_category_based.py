@@ -7,7 +7,7 @@ from tqdm import tqdm
 from math import log
 
 # Configuration and Constants
-HUNKSIZE = 4000
+HUNKSIZE = 40000
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
 testing_api = "http://127.0.0.1:5000"
@@ -36,21 +36,21 @@ except json.JSONDecodeError:
     sys.exit(1)
 
 
-def get_verses(verses_object: dict, chname: str):
+def get_verses(verses_object, chname):
     """ Generator to yield verse number and text from a chapter. """
     for verse in tqdm(verses_object, desc=f"Verses of chapter {chname}", leave=False):
         vers = verse.get("verse", "???")
         text = verse.get("text", "Verse text missing!?")
         yield int(vers), text
 
-def get_chapters(book_object: dict, bname: str):
+def get_chapters(book_object, bname):
     """ Generator to yield chapter number and verses from a book. """
     for chapter_object in tqdm(book_object.get("chapters", []), desc=f"Book {bname}", leave=False):
         chapt = chapter_object.get("chapter", "???")
         verses_object = chapter_object.get("verses", [])
         yield int(chapt), get_verses(verses_object, chapt)
 
-def get_books(books: None | list[str]=None, path: str="Bible-kjv"):
+def get_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
     if not books:
         books = ALL_BOOKS
@@ -68,7 +68,7 @@ def get_books(books: None | list[str]=None, path: str="Bible-kjv"):
         yield book, get_chapters(book_object, book)
     print('\n')
 
-def do_request_category(question: str) -> tuple[str, list[str]]:
+def do_request_category(question):
     """Request which category to use from api."""
     cat_books = [
         ['Genesis', 'Exodus', 'Leviticus', 'Numbers', 'Deuteronomy', 'Joshua', 'Judges', 'Ruth', '1 Samuel', '2 Samuel', '1 Kings', '2 Kings', '1 Chronicles', '2 Chronicles', 'Ezra', 'Nehemiah', 'Esther',],
@@ -164,7 +164,7 @@ Out of the categories ({', '.join(f'<{name}>' for name in cat_names)}), the cate
     
     return ', '.join(cat_names_string), cat_books_selected, confidence / count
 
-def do_request(question: str, hunk: str, book: str, hunk_start: tuple[int, int], hunk_end: tuple[int, int]):
+def do_request(question, hunk, book, hunk_start, hunk_end):
     """ Send request to the API and get the response. """
     data = {
         "prompt": (

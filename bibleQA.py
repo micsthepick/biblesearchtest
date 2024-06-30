@@ -36,25 +36,25 @@ except json.JSONDecodeError:
     sys.exit(1)
 
 
-def get_verses(verses_object: dict, chname: str):
+def get_verses(verses_object, chname):
     """ Generator to yield verse number and text from a chapter. """
     for verse in tqdm(verses_object, desc=f"Verses of chapter {chname}", leave=False):
         vers = verse.get("verse", "???")
         text = verse.get("text", "Verse text missing!?")
         yield int(vers), text
 
-def get_chapters(book_object: dict, bname: str):
+def get_chapters(book_object, bname):
     """ Generator to yield chapter number and verses from a book. """
     for chapter_object in tqdm(book_object.get("chapters", []), desc=f"Book {bname}", leave=False):
         chapt = chapter_object.get("chapter", "???")
         verses_object = chapter_object.get("verses", [])
         yield int(chapt), get_verses(verses_object, chapt)
 
-def get_books(books: None | list[str]=None, path: str="Bible-kjv"):
+def get_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
     if not books:
         books = ALL_BOOKS
-    for book in tqdm(books, desc=f'Searching {len(books)} KJV books'):
+    for book in tqdm(books, desc=f'Searching {len(books)} KJV books', leave=False):
         file_path = Path(path).joinpath(f"{book.replace(' ', '')}.json")
         try:
             with open(file_path, 'r') as file:
@@ -66,9 +66,9 @@ def get_books(books: None | list[str]=None, path: str="Bible-kjv"):
             print(f"Error: The file {file_path} is not a valid JSON file.")
             continue
         yield book, get_chapters(book_object, book)
-    print('\n')
+    tqdm.write('\n')
 
-def do_request(question: str, hunk: str, book: str, hunk_start: tuple[int, int], hunk_end: tuple[int, int]):
+def do_request(question, hunk, book, hunk_start, hunk_end):
     """ Send request to the API and get the response. """
     data = {
         "prompt": (
@@ -121,15 +121,18 @@ Answer (Must be 'yes' or 'no' without quotes):"""
         "verse_end": verse_end
     }
 
-def get_score(value: float):
+def get_score(value):
     """ Convert raw score to a human-readable score. """
     return f"{int(1000-round(1000*log(1001-1000*value) / log(1001)))}/1000"
 
 def main():
+    book_filter = None
+    if len(sys.argv) > 1:
+        book_filter = sys.argv[1:]
     while True:
         scores = []
         question = input('Search Query (e.g. question or biblical statement): ')
-        for book, book_contents in get_books():
+        for book, book_contents in get_books(book_filter):
             hunk = ""
             hunk_start = (1, 1)
             for chapter, chapter_contents in book_contents:
@@ -146,11 +149,11 @@ def main():
                 hunk_start = (chapter, verse + 1)
 
         n = 5
-        print(f'Scores accumulated. Best {n} hunks to follow')
+        tqdm.write(f'Scores accumulated. Best {n} hunks to follow')
         best = sorted(scores, key=lambda x:-x['score'])[:n]
-        print(*(f"{get_score(obj['score'])}: {obj['ref']}" for obj in best), sep='\n')
+        tqdm.write('\n'.join([f"{get_score(obj['score'])}: {obj['ref']}" for obj in best]))
         for selection in best:
-            print(f'Selecting hunk:', selection['ref'])
+            tqdm.write(f"Selecting hunk: {selection['ref']}")
             specific_scores = []
             for book, book_contents in get_books([selection['book']]):
                 for chapter, chapter_contents in book_contents:
@@ -164,14 +167,13 @@ def main():
                         elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
                             break
                         specific_scores.append((do_request(question, verse_text, book, (chapter, verse), (chapter, verse)), verse_text))
-
-        nv = 1
-        print(f"Best {nv} verses from hunk in {selection['book']}:")
-        for obj, text in sorted(specific_scores, key=lambda x: -x[0]['score'])[:nv]:
-            score = get_score(obj['score'])
-            ref = obj['ref']
-            print(f'  Score: {score}, Reference: {ref};')
-            print('    ' + '    '.join(text.split('\n')))
+            nv = 1
+            tqdm.write(f"Best {nv} verses from hunk in {selection['book']}:")
+            for obj, text in sorted(specific_scores, key=lambda x: -x[0]['score'])[:nv]:
+                score = get_score(obj['score'])
+                ref = obj['ref']
+                tqdm.write(f'  Score: {score}, Reference: {ref};')
+                tqdm.write('    ' + '    '.join(text.split('\n')))
 
 
 if __name__ == "__main__":
