@@ -10,15 +10,15 @@ from math import log
 
 # Configuration and Constants
 HUNKSIZE = 4000
-BATCHSIZE = 64
+BATCHSIZE = 16
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
 testing_api = "http://127.0.0.1:8080"
 api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
 route = "completion"
 URL = f"{api}/{route}"
-yes_token = " yes"
-no_token = " no"
+yes_token = "yes"
+no_token = "no"
 tokroute = 'tokenize'
 TOKURL = f"{api}/{tokroute}"
 
@@ -73,10 +73,13 @@ async def get_books(books=None, path="Bible-kjv"):
         yield book, get_chapters(book_object)
 
 async def get_data(question, hunk):
-    return f"""[INST]Determine whether the Bible text is applicable for answering the provided question[/INST]
-<Question>{question}</Question>
-<BibleText>{hunk}</BibleText>
-(Your Answer Must be 'yes' or 'no' without quotes):"""
+    return f"""<|user|>
+Determine whether the Bible text is applicable for answering the provided question:
+QUESTION: {question}
+TEXT: {hunk}
+(Your Answer Must be 'yes' or 'no' without quotes)<|end|>
+<|assistant|>
+"""
 
 def get_score(value):
     """ Convert raw score to a human-readable score. """
@@ -219,7 +222,7 @@ async def main():
                             batch.append((question, verse_text, book, (chapter, verse), (chapter, verse)))
                             batchi += 1
                             if batchi >= BATCHSIZE:
-                                specific_scores += await process_batch(session, batch)
+                                specific_scores += await process_batch(session, batch, yes_token_id, no_token_id)
                                 batch = []
                                 batchi = 0
                 if batch:
