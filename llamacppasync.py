@@ -10,7 +10,7 @@ from math import log
 
 # Configuration and Constants
 HUNKSIZE = 4000
-BATCHSIZE = 16
+BATCHSIZE = 64
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
 testing_api = "http://127.0.0.1:8080"
@@ -18,9 +18,9 @@ api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
 route = "completion"
 URL = f"{api}/{route}"
 yes_token = " yes"
-yes_token_id = 5081
 no_token = " no"
-no_token_id = 708
+tokroute = 'tokenize'
+TOKURL = f"{api}/{tokroute}"
 
 # File paths
 file_path = './Bible-kjv/Books.json'
@@ -31,18 +31,15 @@ headers = {
     "Authorization": f"Bearer {AUTH}"
 }
 
+
+async def get_tok(session, tok):
+    data = {"content": tok}
+    async with session.post(TOKURL, headers=headers, json=data, ssl=False) as response:
+        return (await response.json()).get("tokens", [-1])[-1]
+
 async def load_books():
     async with aiofiles.open(file_path, 'r') as file:
         return json.loads(await file.read())
-
-try:
-    ALL_BOOKS = asyncio.run(load_books())
-except FileNotFoundError:
-    tqdm.write(f"Error: The file {file_path} does not exist.")
-    sys.exit(1)
-except json.JSONDecodeError:
-    tqdm.write(f"Error: The file {file_path} is not a valid JSON file.")
-    sys.exit(1)
 
 async def get_verses(verses_object):
     """ Generator to yield verse number and text from a chapter. """
@@ -76,10 +73,9 @@ async def get_books(books=None, path="Bible-kjv"):
         yield book, get_chapters(book_object)
 
 async def get_data(question, hunk):
-    """ Send request to the API and get the response. """
     return f"""[INST]Determine whether the Bible text is applicable for answering the provided question[/INST]
 <Question>{question}</Question>
-</BibleText>{hunk}</BibleText>
+<BibleText>{hunk}</BibleText>
 (Your Answer Must be 'yes' or 'no' without quotes):"""
 
 def get_score(value):
@@ -100,7 +96,8 @@ async def generate_tasks(question, book_filter):
         if hunk:
             yield (question, hunk, book, hunk_start, (chapter, verse))
 
-async def process_batch(session, values):
+async def process_batch(session, values, yes_token_id, no_token_id):
+    """ Send request to the API and get the response. """
     data = {
         "prompt": [await get_data(*value[:2]) for value in values],
         "temperature": -1,
@@ -136,9 +133,9 @@ async def process_batch(session, values):
         for tok in resp_completions:
             if not isinstance(tok, dict):
                 break
-            if tok.get("tok_str", "") == yes_token:
+            if tok.get("tok_str", "").strip() == yes_token.strip():
                 yes_raw = tok.get('prob', 0)
-            elif tok.get("tok_str", "") == no_token:
+            elif tok.get("tok_str", "").strip() == no_token.strip():
                 no_raw = tok.get('prob', 0)
 
         if yes_raw is None:
@@ -173,10 +170,17 @@ async def main():
     book_filter = None
     if len(sys.argv) > 1:
         book_filter = sys.argv[1:]
+
+    yes_token_id = None
+    no_token_id = None
     while True:
         question = input('Search Query (e.g. question or biblical statement): ')
 
         async with aiohttp.ClientSession() as session:
+            if (yes_token_id is None):
+                yes_token_id = await get_tok(session, yes_token)
+            if (no_token_id is None):
+                no_token_id = await get_tok(session, no_token)
             scores = []
             task_gen = generate_tasks(question, book_filter)
             iterating = True
@@ -189,7 +193,7 @@ async def main():
                     except StopAsyncIteration:
                         iterating = False
                         break
-                scores += await process_batch(session, tasks)
+                scores += await process_batch(session, tasks, yes_token_id, no_token_id)
             n = 7
             tqdm.write(f'Scores accumulated. Best {n} hunks to follow')
             best = sorted(scores, key=lambda x:-x['score'])[:n]
@@ -214,7 +218,7 @@ async def main():
                             texts.append(verse_text)
                             batch.append((question, verse_text, book, (chapter, verse), (chapter, verse)))
                             batchi += 1
-                            if (batchi >= BATCHSIZE):
+                            if batchi >= BATCHSIZE:
                                 specific_scores += await process_batch(session, batch)
                                 batch = []
                                 batchi = 0
@@ -231,6 +235,16 @@ async def main():
                     ref = obj['ref']
                     tqdm.write(f'  Score: {score}, Reference: {ref};')
                     tqdm.write('    ' + '    '.join(text.split('\n')))
+
+
+try:
+    ALL_BOOKS = asyncio.run(load_books())
+except FileNotFoundError:
+    tqdm.write(f"Error: The file {file_path} does not exist.")
+    sys.exit(1)
+except json.JSONDecodeError:
+    tqdm.write(f"Error: The file {file_path} is not a valid JSON file.")
+    sys.exit(1)
 
 if __name__ == "__main__":
     asyncio.run(main())
