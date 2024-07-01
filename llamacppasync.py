@@ -223,7 +223,7 @@ async def main():
                                 batch = []
                                 batchi = 0
                 if batch:
-                        specific_scores += await process_batch(session, batch)
+                        specific_scores += await process_batch(session, batch, yes_token_id, no_token_id)
                         batch = []
                 nv = 3
                 top_indexes = sorted(range(len(specific_scores)), key=lambda x: specific_scores[x]['score'], reverse=True)[:nv]
