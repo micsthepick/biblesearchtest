@@ -1,12 +1,13 @@
 import asyncio
 import aiohttp
 import aiofiles
+from tqdm.asyncio import tqdm
 import os
 import json
 import sys
 from pathlib import Path
 from math import log
-from tqdm.asyncio import tqdm
+import heapq
 
 
 # Configuration and Constants
@@ -35,7 +36,17 @@ headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {AUTH}"
 }
-
+def get_data(question, hunk):
+    return f"""[INST]Determine whether the Bible text is applicable for answering the provided question:
+[TEXT]
+{hunk}
+[END TEXT]
+(Your Answer Must be 'yes' or 'no' without quotes)
+[QUESTION]
+{question}
+[END QUESTION]
+[/INST]
+Answer:"""
 
 async def get_tok(session, tok):
     data = {"content": tok}
@@ -46,16 +57,16 @@ async def load_books():
     async with aiofiles.open(file_path, 'r') as file:
         return json.loads(await file.read())
 
-async def get_verses(verses_object):
+def get_verses(verses_object):
     """ Generator to yield verse number and text from a chapter. """
     for verse in verses_object:
         vers = verse.get("verse", "???")
         text = verse.get("text", "Verse text missing!?")
         yield int(vers), text
 
-async def get_chapters(book_object):
+def get_chapters(book_object):
     """ Generator to yield chapter number and verses from a book. """
-    for chapter_object in book_object.get("chapters", {}):
+    for chapter_object in book_object.get("chapters", []):
         chapt = chapter_object.get("chapter", "???")
         verses_object = chapter_object.get("verses", [])
         yield int(chapt), get_verses(verses_object)
@@ -64,115 +75,140 @@ async def get_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
     if not books:
         books = ALL_BOOKS
+        books = ["Jeremiah"]
     for book in books:
         file_path = Path(path).joinpath(f"{book.replace(' ', '')}.json")
         try:
             async with aiofiles.open(file_path, 'r') as file:
                 book_object = json.loads(await file.read())
         except FileNotFoundError:
-            print(f"Error: The file {file_path} does not exist.")
+            tqdm.write(f"Error: The file {file_path} does not exist.")
             continue
         except json.JSONDecodeError:
-            print(f"Error: The file {file_path} is not a valid JSON file.")
+            tqdm.write(f"Error: The file {file_path} is not a valid JSON file.")
             continue
         yield book, get_chapters(book_object)
-
-def get_data(question, hunk):
-    return f"""[INST]Determine whether the Bible text is applicable for answering the provided question:
-QUESTION: {question}
-TEXT: {hunk}
-(Your Answer Must be 'yes' or 'no' without quotes)[/INST]
-Answer:"""
 
 def get_score(value):
     """ Convert raw score to a human-readable score. """
     return f"{int(1000-round(1000*log(1001-1000*value) / log(1001)))}/1000"
 
-async def generate_tasks(question, book_filter):
-    async for book, book_contents in get_books(book_filter):
+async def generate_tasks(queue, book_filter):
+    book_count = len(book_filter if book_filter else ALL_BOOKS)
+    async for book, book_contents in tqdm(get_books(book_filter), desc="Books: ", total=book_count, leave=True):
         hunk = ""
-        hunk_start = (1, 1)
-        async for chapter, chapter_contents in book_contents:
-            async for verse, verse_text in chapter_contents:
+        hunk_start_chapter = 1
+        hunk_start_verse = 1
+        async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+            async for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
                 hunk += verse_text + '\n'
                 if len(hunk) > HUNKSIZE:
-                    yield (question, hunk, book, hunk_start, (chapter, verse))
+                    await queue.put((hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse))
                     hunk = ""
-                    hunk_start = (chapter, verse + 1)
+                    hunk_start_chapter = chapter
+                    hunk_start_verse = verse + 1
         if hunk:
-            yield (question, hunk, book, hunk_start, (chapter, verse))
+            await queue.put((hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse))
 
-async def process(session, question, hunk, book, chapter_start, verse_start, chapter_end, verse_end, yes_token_id, no_token_id):
-    """ Send request to the API and get the response. """
-    data = {
-        "prompt": get_data(question, hunk),
-        "temperature": -1,
-        "n_predict": 1,
-        "logit_bias": [[i,False] for i in range(256*256) if i not in [yes_token_id, no_token_id]],
-        "n_probs": 2,
-        "add_bos_token": True,
-        "samplers": []
-    }
-    async with session.post(URL, headers=headers, json=data, ssl=False) as response:
-        response_json = await response.json()
+    tqdm.write('final tasks will finish shortly')
+    await queue.put(None)  # Signal the end of the queue
+
+async def process(queue, session, question, yes_token_id, no_token_id, topn=25):
+    """ Process items from the queue and send requests to the API. """
+    results = []
+
+    def append_if_good(results, elem, topn=topn):
+        return heapq.nlargest(topn, results + [elem], key=lambda x:x['score'])
+
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+
+        hunk, book, chapter_start, verse_start, chapter_end, verse_end = item
+
+        data = {
+            "prompt": get_data(question, hunk),
+            "temperature": -1,
+            "n_predict": 1,
+            "logit_bias": [[i, False] for i in range(256 * 256) if i not in [yes_token_id, no_token_id]],
+            "n_probs": 2,
+            "add_bos_token": True,
+            "samplers": []
+        }
+        async with session.post(URL, headers=headers, json=data, ssl=False) as response:
+            response_json = await response.json()
 
         if not isinstance(response_json, dict) or 'err' in response_json or 'error' in response_json:
-            print(str(response_json))
-            return {
-                "score": -999,
-                "error": response_json
-            }
-    resp_completions = response_json.get("completion_probabilities", [{}])[0].get("probs", [])
-    if not resp_completions:
-        return {
-            "score": -999,
-            "error": "completion_probabilities not found"
-        }
+            tqdm.write(str(response_json))
+            continue
 
-    yes_raw = 0
-    no_raw = 0
+        resp_completions = response_json.get("completion_probabilities", [{}])[0].get("probs", None)
+        if not resp_completions:
+            tqdm.write("ERR: no completions")
+            continue
 
-    for tok in resp_completions:
-        if not isinstance(tok, dict):
-            break
-        if tok.get("tok_str", "").strip() == yes_token.strip():
-            yes_raw = tok.get('prob', 0)
-        elif tok.get("tok_str", "").strip() == no_token.strip():
-            no_raw = tok.get('prob', 0)
-
-    if yes_raw is None:
         yes_raw = 0
-    if no_raw is None:
         no_raw = 0
 
-    if (yes_raw + no_raw) == 0:
-        score = 0
-    else:
-        score = yes_raw / (yes_raw + no_raw)
+        for tok in resp_completions:
+            if not isinstance(tok, dict):
+                break
+            if tok.get("tok_str", "").strip() == yes_token.strip():
+                yes_raw = tok.get('prob', 0)
+            elif tok.get("tok_str", "").strip() == no_token.strip():
+                no_raw = tok.get('prob', 0)
 
-    contents_string = f"{book} {chapter_start}:{verse_start}"
-    if chapter_start != chapter_end:
-        contents_string += f"-{chapter_end}:{verse_end}"
-    elif verse_start != verse_end:
-        contents_string += f"-{verse_end}"
+        if yes_raw is None:
+            yes_raw = 0
+        if no_raw is None:
+            no_raw = 0
 
-    return {
-        "score": score,
-        "question": question,
-        "book": book,
-        "ref": contents_string,
-        "chapter_start": chapter_start,
-        "verse_start": verse_start,
-        "chapter_end": chapter_end,
-        "verse_end": verse_end
-    }
+        if (yes_raw + no_raw) == 0:
+            score = 0
+        else:
+            score = yes_raw / (yes_raw + no_raw)
+
+        contents_string = f"{book} {chapter_start}:{verse_start}"
+        if chapter_start != chapter_end:
+            contents_string += f"-{chapter_end}:{verse_end}"
+        elif verse_start != verse_end:
+            contents_string += f"-{verse_end}"
+
+        results = append_if_good(
+            results,
+            {
+                "score": score,
+                "question": question,
+                "book": book,
+                "ref": contents_string,
+                "verse": None if chapter_end != chapter_start or verse_end != verse_start else hunk,
+                "chapter_start": chapter_start,
+                "verse_start": verse_start,
+                "chapter_end": chapter_end,
+                "verse_end": verse_end
+            }
+        )
+
+    return results
+
+async def get_tasks_for_selection(queue, selection):
+    async for book, book_contents in get_books([selection['book']]):
+        async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+            if chapter < selection['chapter_start']:
+                continue
+            elif chapter > selection['chapter_end']:
+                break
+            async for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
+                if chapter == selection['chapter_start'] and verse < selection['verse_start']:
+                    continue
+                elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
+                    break
+                await queue.put((verse_text, book, chapter, verse, chapter, verse))
+    await queue.put(None)
 
 async def main():
-    semaphore = asyncio.Semaphore(BATCHSIZE)
-
-    async def process_considering_batchsize(*args):
-        async with semaphore:
-            return process(*args)
+    queue = asyncio.Queue(BATCHSIZE)
 
     book_filter = None
     if len(sys.argv) > 1:
@@ -180,6 +216,7 @@ async def main():
 
     yes_token_id = None
     no_token_id = None
+
     while True:
         question = input('Search Query (e.g. question or biblical statement): ')
 
@@ -190,49 +227,31 @@ async def main():
                 continue
 
         async with aiohttp.ClientSession() as session:
-            if (yes_token_id is None):
+            if yes_token_id is None:
                 yes_token_id = await get_tok(session, yes_token)
-            if (no_token_id is None):
+            if no_token_id is None:
                 no_token_id = await get_tok(session, no_token)
-            task_gen = generate_tasks(question, book_filter)
-            tasks = []
-            async for question, hunk, book, (chapter_start, verse_start), (chapter_end, verse_end) in task_gen:
-                tasks.append(await process_considering_batchsize(session, question, hunk, book, chapter_start, verse_start, chapter_end, verse_end, yes_token_id, no_token_id))
-            scores = await tqdm.gather(*tasks, desc='finding best hunks', leave=False)
-            n = 7
-            print(f'Scores accumulated. Best {n} hunks to follow')
-            best = sorted(scores, key=lambda x:-x['score'])[:n]
-            print('\n'.join([f"{get_score(obj['score'])}: {obj['ref']}" for obj in best]))
-            for selection in best:
+
+            producer = generate_tasks(queue, book_filter)
+            consumer = process(queue, session, question, yes_token_id, no_token_id, 5)
+            scores = (await asyncio.gather(*[producer, consumer]))[1]
+            
+            print(f'Scores accumulated. Best {len(scores)} hunks to follow')
+            # already sorted by heapq
+            print('\n'.join([f"{get_score(obj['score'])}: {obj['ref']}" for obj in scores]))
+            for selection in scores:
                 print(f"Selecting hunk: {selection['ref']}")
-                texts = []
-                tasks = []
-                async for book, book_contents in get_books([selection['book']]):
-                    async for chapter, chapter_contents in book_contents:
-                        if chapter < selection['chapter_start']:
-                            continue
-                        elif chapter > selection['chapter_end']:
-                            break
-                        async for verse, verse_text in chapter_contents:
-                            if chapter == selection['chapter_start'] and verse < selection['verse_start']:
-                                continue
-                            elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
-                                break
-                            texts.append(verse_text)
-                            tasks.append(await process_considering_batchsize(session, question, hunk, book, chapter_start, verse_start, chapter_end, verse_end, yes_token_id, no_token_id))
-                specific_scores = await tqdm.gather(*tasks, desc='finding best verses', leave=False)
                 nv = 3
-                top_indexes = sorted(range(len(specific_scores)), key=lambda x: specific_scores[x]['score'], reverse=True)[:nv]
-                print(f"Best {nv} verses from hunk in {selection['book']}:")
-                for i in top_indexes:
-                    text = texts[i]
-                    obj = specific_scores[i]
+                producer = get_tasks_for_selection(queue, selection)
+                consumer = process(queue, session, question, yes_token_id, no_token_id, nv)
+                scores = (await asyncio.gather(*[producer, consumer]))[1]
+                print(f"Best {len(scores)} verses from hunk in {selection['book']}:")
+                for obj in scores:
+                    text = obj['verse']
                     score = get_score(obj['score'])
                     ref = obj['ref']
                     print(f'  Score: {score}, Reference: {ref};')
                     print('    ' + '    '.join(text.split('\n')))
-                # kick prevention
-                await asyncio.sleep(0.5)
 
 
 try:
