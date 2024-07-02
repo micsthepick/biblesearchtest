@@ -11,12 +11,10 @@ from tqdm.asyncio import tqdm
 
 # Configuration and Constants
 HUNKSIZE = 3696
-BATCHSIZE = 128
+BATCHSIZE = 32
 # used model ctx size should be related to the above with the following eqn:
 # CTXSIZE = BATCHSIZE*(HUNKSIZE/4+400/4), or alternatively HUNKSIZE = 4*CTXSIZE/BATCHSIZE-400
-# BATCHSIZE = 16 and CTXSIZE = 65536 (HUNKSIZE = 15984) works best from experimentation on my 24GB 3090, (need to compress kv cache)
-# with model Phi-3-mini-128k-instruct
-# (BATCHSIZE = 16, CTXSIZE = 32768 (max), HUNKSIZE = 7792) with HelloBible
+# (BATCHSIZE = 32, CTXSIZE = 32768 (max), HUNKSIZE = 3696) with HelloBible works well on my RTX 3090 with 24GB VRAM
 
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
@@ -80,11 +78,11 @@ async def get_books(books=None, path="Bible-kjv"):
         yield book, get_chapters(book_object)
 
 def get_data(question, hunk):
-    return f"""Determine whether the Bible text is applicable for answering the provided question:
+    return f"""[INST]Determine whether the Bible text is applicable for answering the provided question:
 QUESTION: {question}
 TEXT: {hunk}
-(Your Answer Must be 'yes' or 'no' without quotes)<|end|>
-ANSWER:"""
+(Your Answer Must be 'yes' or 'no' without quotes)[/INST]
+Answer:"""
 
 def get_score(value):
     """ Convert raw score to a human-readable score. """
@@ -200,7 +198,7 @@ async def main():
             tasks = []
             async for question, hunk, book, (chapter_start, verse_start), (chapter_end, verse_end) in task_gen:
                 tasks.append(await process_considering_batchsize(session, question, hunk, book, chapter_start, verse_start, chapter_end, verse_end, yes_token_id, no_token_id))
-            scores = await tqdm.gather(*tasks, 'finding best hunks', leave=False)
+            scores = await tqdm.gather(*tasks, desc='finding best hunks', leave=False)
             n = 7
             print(f'Scores accumulated. Best {n} hunks to follow')
             best = sorted(scores, key=lambda x:-x['score'])[:n]
@@ -222,8 +220,7 @@ async def main():
                                 break
                             texts.append(verse_text)
                             tasks.append(await process_considering_batchsize(session, question, hunk, book, chapter_start, verse_start, chapter_end, verse_end, yes_token_id, no_token_id))
-                await asyncio.sleep(0.2)
-                specific_scores = await tqdm.gather(*tasks, 'finding best verses', leave=False)
+                specific_scores = await tqdm.gather(*tasks, desc='finding best verses', leave=False)
                 nv = 3
                 top_indexes = sorted(range(len(specific_scores)), key=lambda x: specific_scores[x]['score'], reverse=True)[:nv]
                 print(f"Best {nv} verses from hunk in {selection['book']}:")
@@ -234,6 +231,8 @@ async def main():
                     ref = obj['ref']
                     print(f'  Score: {score}, Reference: {ref};')
                     print('    ' + '    '.join(text.split('\n')))
+                # kick prevention
+                await asyncio.sleep(0.5)
 
 
 try:
