@@ -75,7 +75,6 @@ async def get_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
     if not books:
         books = ALL_BOOKS
-        books = ["Jeremiah"]
     for book in books:
         file_path = Path(path).joinpath(f"{book.replace(' ', '')}.json")
         try:
