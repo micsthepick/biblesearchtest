@@ -10,7 +10,7 @@ import heapq
 
 
 # Configuration and Constants
-BATCHSIZE = 64
+BATCHSIZE = 32
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
 testing_api = "http://127.0.0.1:8080"
@@ -31,11 +31,11 @@ def get_data(question, hunk):
     return f"""[INST]Determine whether the Bible text is applicable for QUERY:[/INST]
 [TEXT]
 {hunk}
-[END TEXT]
+[/TEXT]
 (Your Answer Must be 'yes' or 'no' without quotes)
 [QUERY]
 {question}
-[END QUERY]
+[/QUERY]
 Answer:"""
 
 

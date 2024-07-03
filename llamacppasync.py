@@ -37,15 +37,14 @@ headers = {
     "Authorization": f"Bearer {AUTH}"
 }
 def get_data(question, hunk):
-    return f"""[INST]Determine whether the Bible text is applicable for answering the provided question:
+    return f"""[INST]Determine whether the Bible text is applicable for QUERY:[/INST]
 [TEXT]
 {hunk}
-[END TEXT]
+[/TEXT]
 (Your Answer Must be 'yes' or 'no' without quotes)
-[QUESTION]
+[QUERY]
 {question}
-[END QUESTION]
-[/INST]
+[/QUERY]
 Answer:"""
 
 async def get_tok(session, tok):
