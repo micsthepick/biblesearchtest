@@ -52,7 +52,8 @@ headers = {
     "Authorization": f"Bearer {AUTH}"
 }
 def get_data(question, hunk):
-    return f"""[INST]Determine whether the Bible text is applicable for QUERY:
+    return f"""[INST]You're a Christian theology assistant, as far as possible, always refer to the stories in the Bible.
+Determine whether the Bible text is applicable for QUERY:
 [TEXT]
 {hunk}
 [/TEXT]
