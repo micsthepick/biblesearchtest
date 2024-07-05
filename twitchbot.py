@@ -245,7 +245,7 @@ no_token_id = None
 processingSem = asyncio.BoundedSemaphore()
 timeoutSem = NonBlockingBoundedSemaphore()
 
-TIMEOUT = 30
+TIMEOUT = 45
 
 # Command to handle searching
 @bot.command(name='search', aliases=['bb', 'bible', 'book', 'booksearch'])
@@ -255,18 +255,20 @@ async def search(ctx):
     global yes_token_id, no_token_id, timeoutSem, timeout_value
 
     should_obey_timeout = user.name not in [bot_username, channel_name]
-    should_obey_timeout = True
 
     has_aquired_timeout = await timeoutSem.try_acquire()
-    if (not has_aquired_timeout):
-        if (should_obey_timeout):
+    if has_aquired_timeout:
+        timeout_value = None
+    else:
+        if should_obey_timeout:
+            if timeout_value is None:
+                await ctx.send(f"Wait for the current request to finish first! @{user.name}")
+                return
             remaining = (timeout_value-datetime.now()).total_seconds()
             remaining = int(ceil(max(remaining, 0)))
             await ctx.send(f'Please wait {remaining} seconds before trying again, @{user.name}')
             return
         await ctx.send(f'@{user.name} is bypassing the current timeout!')
-    else:
-        timeout_value = datetime.now() + timedelta(seconds=TIMEOUT)
     try:
         async with processingSem:
             # ctx is the context object automatically passed by Twitchio
@@ -336,7 +338,8 @@ async def search(ctx):
                         await ctx.send(f'@{user.name} sorry, something wrong happened and I can not seem to find anything!')
             except Exception as e:
                 await ctx.send(f'OWW, don\'t you love it when you encounter a {e}.')
-            await asyncio.sleep(TIMEOUT-2)
+            timeout_value = datetime.now() + timedelta(seconds=TIMEOUT)
+            await asyncio.sleep(TIMEOUT)
     finally:
         if has_aquired_timeout:
             timeoutSem.release()
