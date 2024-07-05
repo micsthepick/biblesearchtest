@@ -128,6 +128,10 @@ async def generate_tasks(queue, book_filter):
 
     tqdm.write('final tasks will finish shortly')
     await queue.put(None)  # Signal the end of the queue
+    for i in tqdm(range(remaining, -1, -1), desc='waiting for queue to clear', leave=False):
+        remaining = queue.qsize()
+        if i <= remaining:
+            await asyncio.sleep(0.1)
 
 async def process(queue, session, question, yes_token_id, no_token_id, topn=25):
     """ Process items from the queue and send requests to the API. """
@@ -222,6 +226,11 @@ async def get_tasks_for_selection(queue, selection):
                     break
                 await queue.put((verse_text, book, chapter, verse, chapter, verse))
     await queue.put(None)
+    remaining = queue.qsize()
+    for i in tqdm(range(remaining, -1, -1), desc='waiting for queue to clear', leave=False):
+        remaining = queue.qsize()
+        if i <= remaining:
+            await asyncio.sleep(0.1)
 
 class NonBlockingBoundedSemaphore:
     def __init__(self, permits=1):
@@ -320,7 +329,7 @@ async def search(ctx):
                     print(f'Scores accumulated. Sending Best {len(scores)}')
                     no_results = True
                     for selection in scores:
-                        if selection["score"] < 0.85:
+                        if selection["score"] < 0.875:
                             break
                         no_results = False
                         await ctx.send(f"@{user.name} found: {selection['ref']}, score {get_score(selection)}")
