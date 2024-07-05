@@ -128,6 +128,7 @@ async def generate_tasks(queue, book_filter):
 
     tqdm.write('final tasks will finish shortly')
     await queue.put(None)  # Signal the end of the queue
+    remaining = queue.qsize()
     for i in tqdm(range(remaining, -1, -1), desc='waiting for queue to clear', leave=False):
         remaining = queue.qsize()
         if i <= remaining:
