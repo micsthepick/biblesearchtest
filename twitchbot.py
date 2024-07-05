@@ -329,7 +329,7 @@ async def search(ctx):
                         consumer = process(queue, session, query, yes_token_id, no_token_id, num_verses)
                         scores = (await asyncio.gather(*[producer, consumer]))[1]
                         best_verse = scores[0]
-                        await ctx.send(f"@{user.name} top verse: {selection['ref']}, {get_score(selection)}, " + ' '.join(best_verse['verse'].split('\n')))
+                        await ctx.send(f"@{user.name} top verse: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
                     if no_results:
                         print('no good results')
                         await ctx.send(f'@{user.name} nothing relevant.')
