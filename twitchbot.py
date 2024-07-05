@@ -1,6 +1,9 @@
 import asyncio
 import aiohttp
+from math import ceil
 import aiofiles
+from datetime import datetime, timedelta
+from twitchio.ext import commands
 from tqdm.asyncio import tqdm
 import os
 import json
@@ -11,8 +14,8 @@ import heapq
 
 
 # Configuration and Constants
-HUNKSIZE = 3696
-BATCHSIZE = 32
+HUNKSIZE = 1648
+BATCHSIZE = 64
 # used model ctx size should be related to the above with the following eqn:
 # CTXSIZE = BATCHSIZE*(HUNKSIZE/4+400/4), or alternatively HUNKSIZE = 4*CTXSIZE/BATCHSIZE-400
 # (BATCHSIZE = 32, CTXSIZE = 32768 (max), HUNKSIZE = 3696) with HelloBible works well on my RTX 3090 with 24GB VRAM
@@ -27,6 +30,18 @@ yes_token = "yes"
 no_token = "no"
 tokroute = 'tokenize'
 TOKURL = f"{api}/{tokroute}"
+bot_username =  os.getenv("TWITCH_USER", "")
+bot_token =  os.getenv("TWITCH_KEY", None)
+channel_name = bot_username # this can be any channel, just don't annoy people :)
+
+api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
+
+# Twitch bot setup
+bot = commands.Bot(
+    token=bot_token,
+    prefix='!',
+    initial_channels=[channel_name]
+)
 
 # File paths
 file_path = './Bible-kjv/Books.json'
@@ -37,16 +52,17 @@ headers = {
     "Authorization": f"Bearer {AUTH}"
 }
 def get_data(question, hunk):
-    return f"""[INST]You're a Christian theology assistant, as far as possible, always refer to the stories in the Bible.
-Determine whether the Bible text is applicable for QUERY:[/INST]
+    return f"""[INST]Determine whether the Bible text is applicable for QUERY:
 [TEXT]
 {hunk}
 [/TEXT]
 (Your Answer Must be 'yes' or 'no' without quotes)
 [QUERY]
 {question}
-[/QUERY]
+[/QUERY][/INST]
 Answer:"""
+
+
 
 async def get_tok(session, tok):
     data = {"content": tok}
@@ -90,7 +106,7 @@ async def get_books(books=None, path="Bible-kjv"):
 
 def get_score(value):
     """ Convert raw score to a human-readable score. """
-    return f"{int(1000-round(1000*log(1001-1000*value) / log(1001)))}/1000"
+    return f"{int(1000-round(1000*log(1001-1000*value['score']) / log(1001)))}/1000"
 
 async def generate_tasks(queue, book_filter):
     book_count = len(book_filter if book_filter else ALL_BOOKS)
@@ -206,52 +222,123 @@ async def get_tasks_for_selection(queue, selection):
                 await queue.put((verse_text, book, chapter, verse, chapter, verse))
     await queue.put(None)
 
-async def main():
-    queue = asyncio.Queue(BATCHSIZE)
+class NonBlockingBoundedSemaphore:
+    def __init__(self, permits=1):
+        self._semaphore = asyncio.BoundedSemaphore(permits)
+        self._lock = asyncio.Lock()
 
-    book_filter = None
-    if len(sys.argv) > 1:
-        book_filter = sys.argv[1:]
+    async def try_acquire(self):
+        async with self._lock:
+            if self._semaphore._value > 0:
+                await self._semaphore.acquire()
+                return True
+            else:
+                return False
 
-    yes_token_id = None
-    no_token_id = None
+    def release(self):
+        self._semaphore.release()
 
-    while True:
-        question = input('Search Query (e.g. question or biblical statement): ')
+yes_token_id = None
+no_token_id = None
 
-        base_len = len(get_data(question, ""))
+processingSem = asyncio.BoundedSemaphore()
+timeoutSem = NonBlockingBoundedSemaphore()
 
-        if base_len > 400:
-            if input(f'{base_len-400} chars over limit! continue anyways? [Y/n]')[0].lower() == 'n':
-                continue
+TIMEOUT = 30
 
-        async with aiohttp.ClientSession() as session:
-            if yes_token_id is None:
-                yes_token_id = await get_tok(session, yes_token)
-            if no_token_id is None:
-                no_token_id = await get_tok(session, no_token)
+# Command to handle searching
+@bot.command(name='search', aliases=['bb', 'bible', 'book', 'booksearch'])
+async def search(ctx):
+    user = ctx.author
 
-            producer = generate_tasks(queue, book_filter)
-            consumer = process(queue, session, question, yes_token_id, no_token_id, 5)
-            scores = (await asyncio.gather(*[producer, consumer]))[1]
-            
-            print(f'Scores accumulated. Best {len(scores)} hunks to follow')
-            # already sorted by heapq
-            print('\n'.join([f"{get_score(obj['score'])}: {obj['ref']}" for obj in scores]))
-            for selection in scores:
-                print(f"Selecting hunk: {selection['ref']}")
-                nv = 3
-                producer = get_tasks_for_selection(queue, selection)
-                consumer = process(queue, session, question, yes_token_id, no_token_id, nv)
-                scores = (await asyncio.gather(*[producer, consumer]))[1]
-                print(f"Best {len(scores)} verses from hunk in {selection['book']}:")
-                for obj in scores:
-                    text = obj['verse']
-                    score = get_score(obj['score'])
-                    ref = obj['ref']
-                    print(f'  Score: {score}, Reference: {ref};')
-                    print('    ' + '    '.join(text.split('\n')))
+    global yes_token_id, no_token_id, timeoutSem, timeout_value
 
+    should_obey_timeout = user.name not in [bot_username, channel_name]
+    should_obey_timeout = True
+
+    has_aquired_timeout = await timeoutSem.try_acquire()
+    if (not has_aquired_timeout):
+        if (should_obey_timeout):
+            remaining = (timeout_value-datetime.now()).total_seconds()
+            remaining = int(ceil(max(remaining, 0)))
+            await ctx.send(f'Please wait {remaining} seconds before trying again, @{user.name}')
+            return
+        await ctx.send(f'@{user.name} is bypassing the current timeout!')
+    else:
+        timeout_value = datetime.now() + timedelta(seconds=TIMEOUT)
+    try:
+        async with processingSem:
+            # ctx is the context object automatically passed by Twitchio
+            # Parse the command message
+            message = ctx.message.content.strip()
+            _, *args = message.split()
+            if len(args) < 2:
+                await ctx.send(f'@{user.name} Usage: !search <book_name> <query>')
+                return
+
+            # parse args
+            book_name_user = args[0]
+            query_user = ' '.join(args[1:])
+            query = query_user.translate({v:None for v in '[]<>{}'})
+
+            normname = book_name_user.strip().replace(' ', '').lower()
+            for book, variants in zip(
+                ALL_BOOKS,
+                [['gen'], ['exo'], ['lev'], ['num'], ['deu'], ['jos'], ['judg', 'jug'], ['rut'], ['1sa'], ['2sa'], ['1ki'], ['2ki'], ['1ch'], ['2ch'], ['ezr'], ['neh'], ['est'], ['job'], ['psa'], ['pro'], ['ecc'], ['son'], ['isa'], ['jer'], ['lam'], ['eze'], ['dan'], ['hos'], ['joe'], ['amo'], ['oba'], ['jon'], ['mic'], ['nah'], ['hab'], ['zep'], ['hag'], ['zec'], ['mal'], ['mat'], ['mar'], ['luk'], ['joh'], ['act'], ['rom'], ['1co'], ['2co'], ['gal'], ['eph'], ['phi'], ['col'], ['1th'], ['2th'], ['1ti'], ['2ti'], ['tit'], ['phi'], ['heb'], ['jam'], ['1pe'], ['2pe'], ['1jo'], ['2jo'], ['3jo'], ['jude'], ['rev']]
+            ):
+                if any(normname.startswith(v) for v in variants):
+                    selectedbook = book
+                    break
+            else:
+                await ctx.send(f'Error: I do not reconise the book: "{book_name_user} @{user.name}"')
+                return
+
+            # validate args:
+            base_len = len(get_data(query, ""))
+            if (base_len > 400):
+                await ctx.send(f'Error: Query result is {base_len-400} characters over the limit. Please refine your search. @{user.name}')
+                return
+
+            try:
+                print('user request: ' + query)
+                await ctx.send(f'@{user.name} I think you wanted to look through {selectedbook} - Searching! This may take a while!')
+                queue = asyncio.Queue(BATCHSIZE)
+                async with aiohttp.ClientSession() as session:
+                    if yes_token_id is None:
+                        yes_token_id = await get_tok(session, yes_token)
+                    if no_token_id is None:
+                        no_token_id = await get_tok(session, no_token)
+
+                    num_hunks = 1
+                    producer = generate_tasks(queue, [selectedbook])
+                    consumer = process(queue, session, query, yes_token_id, no_token_id, num_hunks)
+                    scores = (await asyncio.gather(*[producer, consumer]))[1]
+                    
+                    print(f'Scores accumulated. Sending Best {len(scores)}')
+                    no_results = True
+                    for selection in scores:
+                        if selection["score"] < 0.85:
+                            break
+                        no_results = False
+                        await ctx.send(f"@{user.name} found: {selection['ref']}, score {get_score(selection)}")
+                        num_verses = 3
+                        producer = get_tasks_for_selection(queue, selection)
+                        consumer = process(queue, session, query, yes_token_id, no_token_id, num_verses)
+                        scores = (await asyncio.gather(*[producer, consumer]))[1]
+                        best_verse = scores[0]
+                        await ctx.send(f"@{user.name} top verse: {selection['ref']}, {get_score(selection)}, " + ' '.join(best_verse['verse'].split('\n')))
+                    if no_results:
+                        print('no good results')
+                        await ctx.send(f'@{user.name} nothing relevant.')
+                    if not scores:
+                        print('no results')
+                        await ctx.send(f'@{user.name} sorry, something wrong happened and I can not seem to find anything!')
+            except Exception as e:
+                await ctx.send(f'OWW, don\'t you love it when you encounter a {e}.')
+            await asyncio.sleep(TIMEOUT-2)
+    finally:
+        if has_aquired_timeout:
+            timeoutSem.release()
 
 try:
     ALL_BOOKS = asyncio.run(load_books())
@@ -262,5 +349,6 @@ except json.JSONDecodeError:
     print(f"Error: The file {file_path} is not a valid JSON file.")
     sys.exit(1)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# Run the bot
+if __name__ == '__main__':
+    bot.run()
