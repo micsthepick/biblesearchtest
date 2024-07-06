@@ -293,7 +293,7 @@ async def search(ctx):
                     selectedbook = book
                     break
             else:
-                await ctx.send(f'Error: I do not reconise the book: "{book_name_user} @{user.name}"')
+                await ctx.send(f'Error: I do not recognise the book: "{book_name_user} @{user.name}"')
                 return
 
             # validate args:
@@ -312,7 +312,7 @@ async def search(ctx):
                     if no_token_id is None:
                         no_token_id = await get_tok(session, no_token)
 
-                    num_hunks = 1
+                    num_hunks = 3
                     producer = generate_tasks(queue, [selectedbook])
                     consumer = process(queue, session, query, yes_token_id, no_token_id, num_hunks)
                     scores = (await asyncio.gather(*[producer, consumer]))[1]
