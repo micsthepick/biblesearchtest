@@ -319,13 +319,13 @@ async def process(queue, pbar, session, question, book_sep, yes_token_id, no_tok
         await asyncio.gather(*tasks, return_exceptions=True)
 
         if exceptions:
-            raise Exception(exceptions)
+            raise list(exceptions)[0]
 
     return results
 
 
-async def get_tasks_for_selection(queue, selection):
-    for book, book_contents in get_kjv_books([selection['book']]):
+async def get_tasks_for_selection(queue, gen, selection):
+    for book, book_contents in gen([selection['book']]):
         for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
             if chapter < selection['chapter_start']:
                 continue
@@ -524,7 +524,7 @@ async def do_search(interaction, generate_tasks_func, book_sep, user_name, query
                     f"found: {selection['ref']}, score {get_score(selection)}")
                 await send_cb(content="\n".join(contents))
                 num_verses = 3
-                producer = get_tasks_for_selection(queue, selection)
+                producer = get_tasks_for_selection(queue, generate_tasks_func, selection)
                 pbar = tqdm(total=BATCHSIZE,
                             desc="parallel connections:", leave=False)
                 consumer = process(queue, pbar, session, query, book_sep,
