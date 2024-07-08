@@ -324,8 +324,8 @@ async def process(queue, pbar, session, question, book_sep, yes_token_id, no_tok
     return results
 
 
-async def get_tasks_for_selection(queue, gen, selection):
-    for book, book_contents in gen([selection['book']]):
+async def get_tasks_for_selection(queue, generate_cb, selection):
+    for book, book_contents in generate_cb(queue, [selection['book']]):
         for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
             if chapter < selection['chapter_start']:
                 continue
@@ -489,7 +489,7 @@ async def do_error(send_cb, e):
     print(f'>>>EXEC {excid}<<<')
 
 
-async def do_search(interaction, generate_tasks_func, book_sep, user_name, query, details):
+async def do_search(interaction, generate_cb, book_sep, user_name, query, details):
     global yes_token_id, no_token_id
     send_cb = interaction.edit_original_response
     try:
@@ -505,7 +505,7 @@ async def do_search(interaction, generate_tasks_func, book_sep, user_name, query
                 no_token_id = await get_tok(session, no_token)
 
             num_hunks = 3
-            producer = generate_tasks_func(queue, details)
+            producer = generate_cb(queue, details)
             consumer = process(queue, pbar, session, query, book_sep,
                                yes_token_id, no_token_id, num_hunks)
             scores = (await asyncio.gather(producer, consumer))[1]
@@ -524,7 +524,7 @@ async def do_search(interaction, generate_tasks_func, book_sep, user_name, query
                     f"found: {selection['ref']}, score {get_score(selection)}")
                 await send_cb(content="\n".join(contents))
                 num_verses = 3
-                producer = get_tasks_for_selection(queue, generate_tasks_func, selection)
+                producer = get_tasks_for_selection(queue, generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
                             desc="parallel connections:", leave=False)
                 consumer = process(queue, pbar, session, query, book_sep,
