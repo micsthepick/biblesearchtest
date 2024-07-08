@@ -527,7 +527,7 @@ async def do_search(interaction, generate_tasks_func, book_sep, user_name, query
                 producer = get_tasks_for_selection(queue, selection)
                 pbar = tqdm(total=BATCHSIZE,
                             desc="parallel connections:", leave=False)
-                consumer = process(queue, pbar, session, query,
+                consumer = process(queue, pbar, session, query, book_sep,
                                    yes_token_id, no_token_id, num_verses)
                 scores = (await asyncio.gather(producer, consumer))[1]
                 best_verse = scores[0]
