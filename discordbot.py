@@ -354,6 +354,10 @@ class TimeoutLock:
             self._waiting = True
             return True
 
+    async def finished(self):
+        async with self._lock:
+            self._waiting = False
+
     async def can_start_in(self, newduration=None):
         async with self._lock:
             if newduration:
@@ -539,7 +543,7 @@ async def do_search(interaction, generate_tasks_func, book_sep, user_name, query
         await do_error(send_cb, e)
         raise e
     finally:
-        await timeoutLock.release()
+        await timeoutLock.finish()
 
 
 async def validate_bible(interaction, query, normname, query_user, book_name_user, user_name):
