@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import discord
 from discord import Intents
 from discord.ext import commands
-from discord.ui import View, Button
+from discord.ui import View
 from tqdm.asyncio import tqdm
 import os
 import json
@@ -95,7 +95,7 @@ def get_chapters(book_object):
         yield int(chapt), get_verses(verses_object)
 
 
-async def get_kjv_books(books=None, path="Bible-kjv"):
+def get_kjv_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
     if not books:
         books = [{'book_id': book} for book in KJV_BOOK_DETAILS]
@@ -103,8 +103,8 @@ async def get_kjv_books(books=None, path="Bible-kjv"):
         file_path = Path(path).joinpath(
             f"{book['book_id'].replace(' ', '')}.json")
         try:
-            async with aiofiles.open(file_path, 'r') as file:
-                book_object = json.loads(await file.read())
+            with open(file_path, 'r') as file:
+                book_object = json.loads(file.read())
         except FileNotFoundError:
             tqdm.write(f"Error: The file {file_path} does not exist.")
             continue
@@ -118,7 +118,7 @@ async def get_kjv_books(books=None, path="Bible-kjv"):
 def get_egw_paragraphs(paras_object, from_pid, to_pid=None):
     """ Generator to yield verse number and text from a chapter. """
     started = False
-    for para in paras_object:
+    for para_num, para in enumerate(paras_object):
         para_id = para.get("para_id", "???")
         if para_id == from_pid:
             started = True
@@ -127,24 +127,23 @@ def get_egw_paragraphs(paras_object, from_pid, to_pid=None):
         if para_id == to_pid:
             break
         text = para.get("content")
-        yield para_id, text
+        yield para_num + 1, text
 
 
 def get_egw_chapters(zip_ref: zipfile.ZipFile, index):
-    """ Generator to yield chapter number and verses from a book. """
-    for chapter_object in index:
-        chapt = chapter_object.get("title", "???")
+    """ Generator to yield chapter number and verses from a book."""
+    for chapt, chapter_object in enumerate(index):
         para_id = chapter_object.get("para_id")
         id_next = chapter_object.get("id_next", None)
         fname = f"{para_id}.json"
         if fname in set(zi.filename for zi in zip_ref.infolist()):
             with zip_ref.open(fname, 'r') as para_file:
                 paras_object = json.load(para_file)
-        yield chapt, get_egw_paragraphs(paras_object, from_pid=para_id, to_pid=id_next)
+        yield chapt + 1, get_egw_paragraphs(paras_object, from_pid=para_id, to_pid=id_next)
 
 
-async def get_egw_books(books=None, path="egwbooks"):
-    """ Generator to yield book name and its chapters. """
+def get_egw_books(books=None, path="egwbooks"):
+    """Async generator to yield book name and its chapters."""
     if not books:
         books = EGW_BOOK_DETAILS
     for book in books:
@@ -154,7 +153,6 @@ async def get_egw_books(books=None, path="egwbooks"):
                 with zip_ref.open('toc.json', 'r') as index_file:
                     index = json.load(index_file)
                 yield book, get_egw_chapters(zip_ref, index)
-
         except FileNotFoundError:
             tqdm.write(f"Error: The file {file_path} does not exist.")
             continue
@@ -167,12 +165,12 @@ def get_score(value):
 
 async def gen_bible_cb(queue, book_filter):
     book_count = len(book_filter if book_filter else KJV_BOOK_DETAILS)
-    async for book, book_contents in tqdm(await get_kjv_books(book_filter), desc="Books: ", total=book_count, leave=False):
+    for book, book_contents in tqdm(get_kjv_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
         hunk_start_chapter = 1
         hunk_start_verse = 1
-        async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
-            async for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
+        for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+            for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
                 hunk += verse_text + '\n'
                 if len(hunk) > HUNKSIZE:
                     await queue.put((hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse))
@@ -188,12 +186,12 @@ async def gen_bible_cb(queue, book_filter):
 
 async def egw_gen_cb(queue, book_filter):
     book_count = len(book_filter if book_filter else EGW_BOOK_DETAILS)
-    async for book, book_contents in tqdm(await get_egw_books(book_filter), desc="Books: ", total=book_count, leave=False):
+    for book, book_contents in tqdm(get_egw_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
         hunk_start_chapter = 1
         hunk_start_para = None
-        async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
-            async for para, para_text in tqdm(list(chapter_contents), desc="Paragraphs: ", leave=False):
+        for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+            for para, para_text in tqdm(list(chapter_contents), desc="Paragraphs: ", leave=False):
                 if hunk_start_para is None:
                     hunk_start_para = para
                 hunk += para_text + '\n'
@@ -205,8 +203,10 @@ async def egw_gen_cb(queue, book_filter):
         if hunk:
             await queue.put((hunk, book, hunk_start_chapter, hunk_start_para, chapter, para))
 
+    await queue.put(None)  # Signal the end of the queue
 
-async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results, item, session, question, yes_token_id, no_token_id, topn):
+
+async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results, item, session, question, book_sep, yes_token_id, no_token_id, topn):
     def append_if_good(results, elem):
         results[:] = heapq.nlargest(
             topn, results + [elem], key=lambda x: x['score'])
@@ -256,9 +256,9 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
     else:
         score = yes_raw / (yes_raw + no_raw)
 
-    contents_string = f"{book['title']} {chapter_start}:{verse_start}"
+    contents_string = f"{book['title']} {chapter_start}{book_sep}{verse_start}"
     if chapter_start != chapter_end:
-        contents_string += f"-{chapter_end}:{verse_end}"
+        contents_string += f"-{chapter_end}{book_sep}{verse_end}"
     elif verse_start != verse_end:
         contents_string += f"-{verse_end}"
 
@@ -282,14 +282,19 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
     concurrentTaskLimit.release()
 
 
-async def process(queue, pbar, session, question, yes_token_id, no_token_id, num):
+async def process(queue, pbar, session, question, book_sep, yes_token_id, no_token_id, num):
     """ Process items from the queue and send requests to the API. """
     results = []
 
     pbarlock = asyncio.Lock()
     concurrentTaskLimit = asyncio.BoundedSemaphore(BATCHSIZE)
-    tasks = set()
+    tasks = []
     exceptions = []
+
+    # Use task.add_done_callback() to handle exceptions
+    def task_done_callback(task):
+        if task.exception():
+            exceptions.append(task.exception())
 
     try:
         while True:
@@ -304,14 +309,9 @@ async def process(queue, pbar, session, question, yes_token_id, no_token_id, num
                 pbar.refresh()
 
             task = asyncio.create_task(process_and_add_to_scores(
-                pbar, pbarlock, concurrentTaskLimit, results, item, session, question, yes_token_id, no_token_id, num))
-            tasks.add(task)
-
-            # Use task.add_done_callback() to handle exceptions
-            def task_done_callback(task):
-                if task.exception():
-                    exceptions.append(task.exception())
-
+                pbar, pbarlock, concurrentTaskLimit, results, item, session,
+                question, book_sep, yes_token_id, no_token_id, num))
+            tasks.append(task)
             task.add_done_callback(task_done_callback)
 
     finally:
@@ -319,19 +319,19 @@ async def process(queue, pbar, session, question, yes_token_id, no_token_id, num
         await asyncio.gather(*tasks, return_exceptions=True)
 
         if exceptions:
-            raise exceptions[0]
+            raise Exception(exceptions)
 
     return results
 
 
 async def get_tasks_for_selection(queue, selection):
-    async for book, book_contents in get_kjv_books([selection['book']]):
-        async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+    for book, book_contents in get_kjv_books([selection['book']]):
+        for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
             if chapter < selection['chapter_start']:
                 continue
             elif chapter > selection['chapter_end']:
                 break
-            async for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
+            for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
                 if chapter == selection['chapter_start'] and verse < selection['verse_start']:
                     continue
                 elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
@@ -386,83 +386,89 @@ def normalize_string(str):
     return ' '.join(str.translate(replacements).lower().split()).strip()
 
 
-async def choose_candidates(send_cb, candidate_list):
-    """takes in: send_cb, a callback to change the reply's message by calling cb(content="") and a list of tuples:
-    each tuple is (book_id, book_title, score),
-    asks the discord user for the chose best candidate, sorted by score,
-    page by page if more than 10 entries,
-    allowing to choose by button."""
+class CandidateButton(discord.ui.Button):
+    async def callback(self, interaction: discord.Interaction):
+        button_id = self.custom_id
 
+        if button_id.startswith("select_"):
+            index = int(button_id.split("_")[1])
+            selected_candidate = self.view.candidate_list[index]
+            self.view.selection.set_result(selected_candidate[0]['book_id'])
+            self.view.clear_items()
+            await self.view.interaction.edit_original_response(view=None)
+            self.view.stop()
+        elif button_id == 'next':
+            self.view.page += 1
+            await self.view.update_message()
+        elif button_id == 'previous':
+            self.view.page -= 1
+            await self.view.update_message()
+        else:
+            raise ValueError("unkown button!")
+        await interaction.response.defer()
+
+
+class CandidateSelectView(View):
+    def __init__(self, interaction, candidate_list):
+        super().__init__(timeout=120)
+        self.interaction = interaction
+        self.candidate_list = heapq.nlargest(80, candidate_list, key=lambda x: x[1])
+        self.per_page = 8
+        self.page = 0
+        self.pages = 1 + (len(self.candidate_list) - 1) // self.per_page
+        self.selection = asyncio.Future()
+
+    def on_timeout(self):
+        self.clear_items()
+        self.selection.set_result(None)
+
+    def update_buttons(self):
+        self.clear_items()
+
+        start = self.page * self.per_page
+        end = start + self.per_page
+        candidates = self.candidate_list[start:end]
+
+        self.add_item(
+            CandidateButton(
+                label="Previous", row=4,
+                style=discord.ButtonStyle.primary,
+                custom_id="previous",
+                disabled=(self.page <= 0)
+            )
+        )
+        self.add_item(
+            CandidateButton(
+                label="Next",
+                row=4,
+                style=discord.ButtonStyle.primary,
+                custom_id="next",
+                disabled=(end >= len(self.candidate_list))
+            )
+        )
+
+        for idx, candidate in enumerate(candidates):
+            title = candidate[0]['title']
+            if len(title) > 75:
+                title = title[:75] + '...'
+            self.add_item(CandidateButton(label=title, row=idx // 2, style=discord.ButtonStyle.secondary, custom_id=f"select_{start + idx}"))
+
+    async def update_message(self):
+
+        content = f"Choose the best candidate: (page {self.page+1}/{self.pages})\n"
+
+        self.update_buttons()
+
+        await self.interaction.edit_original_response(content=content, view=self)
+
+
+async def choose_candidates(interaction, candidate_list):
     if not candidate_list:
         return
-
-    candidate_list = sorted(candidate_list, key=lambda x: x[2], reverse=True)
-    per_page = 12
-    page = 0
-
-    selection = asyncio.Future()
-
-    async def update_message(interaction, page):
-        start = page * per_page
-        end = start + per_page
-        candidates = candidate_list[start:end]
-
-        content = "Choose the best candidate:\n"
-        for idx, candidate in enumerate(candidates):
-            content += f"{start + idx + 1}. {candidate[1]} (Score: {candidate[2]})\n"
-
-        buttons = []
-        if page > 0:
-            buttons.append(Button(
-                label="Previous", style=discord.ButtonStyle.primary, custom_id="previous"))
-        if end < len(candidate_list):
-            buttons.append(
-                Button(label="Next", style=discord.ButtonStyle.primary, custom_id="next"))
-
-        for idx in range(len(candidates)):
-            buttons.append(Button(label=str(
-                start + idx + 1), style=discord.ButtonStyle.secondary, custom_id=f"select_{start + idx}"))
-
-        view = View(timeout=None)
-        for button in buttons:
-            view.add_item(button)
-
-        await interaction.response.edit_message(content=content, view=view)
-
-    async def button_callback(interaction):
-        nonlocal page
-        custom_id = interaction.data['custom_id']
-
-        selected_candidate = None
-
-        if custom_id == "previous":
-            page -= 1
-        elif custom_id == "next":
-            page += 1
-        elif custom_id.startswith("select_"):
-            index = int(custom_id.split("_")[1])
-            selected_candidate = candidate_list[index]
-            await send_cb(content=f"Selected candidate: {selected_candidate[1]}")
-            await interaction.response.edit_message(view=None)
-            selection.set_result(selected_candidate)
-            return
-
-        await update_message(interaction, page)
-
-    view = View(timeout=None)
-    for button in [Button(label="Previous", style=discord.ButtonStyle.primary, custom_id="previous"),
-                   Button(label="Next", style=discord.ButtonStyle.primary, custom_id="next")]:
-        view.add_item(button)
-
-    for idx in range(min(per_page, len(candidate_list))):
-        view.add_item(Button(label=str(
-            idx + 1), style=discord.ButtonStyle.secondary, custom_id=f"select_{idx}"))
-
-    view.on_timeout = None
-    view.on_submit = button_callback
-    await send_cb(content="Choose the best candidate:", view=view)
-
-    return await selection
+    view = CandidateSelectView(interaction, candidate_list)
+    await view.update_message()
+    selection = await view.selection
+    return selection
 
 
 def geteid():
@@ -473,13 +479,15 @@ def geteid():
 
 
 async def do_error(send_cb, e):
+    print(e)
     excid = geteid()
     await send_cb(content=f'An error occurred, please give the following ID to the bot owner: {excid}.')
     print(f'>>>EXEC {excid}<<<')
 
 
-async def do_search(generate_tasks_func, send_cb, user_name, query, details):
-    global yes_token_id, no_token_id, timeout_value
+async def do_search(interaction, generate_tasks_func, book_sep, user_name, query, details):
+    global yes_token_id, no_token_id
+    send_cb = interaction.edit_original_response
     try:
         print(f'{user_name} requested: ' + query)
         await send_cb(content=f"Looking through {details[0]['title'] if details else 'everywhere'}. This may take a while!")
@@ -494,9 +502,9 @@ async def do_search(generate_tasks_func, send_cb, user_name, query, details):
 
             num_hunks = 3
             producer = generate_tasks_func(queue, details)
-            consumer = process(queue, pbar, session, query,
+            consumer = process(queue, pbar, session, query, book_sep,
                                yes_token_id, no_token_id, num_hunks)
-            scores = (await asyncio.gather(*[producer, consumer]))[1]
+            scores = (await asyncio.gather(producer, consumer))[1]
             pbar.close()
 
             print(f'Scores accumulated. Sending Best {len(scores)}')
@@ -517,7 +525,7 @@ async def do_search(generate_tasks_func, send_cb, user_name, query, details):
                             desc="parallel connections:", leave=False)
                 consumer = process(queue, pbar, session, query,
                                    yes_token_id, no_token_id, num_verses)
-                scores = (await asyncio.gather(*[producer, consumer]))[1]
+                scores = (await asyncio.gather(producer, consumer))[1]
                 best_verse = scores[0]
                 contents.append(
                     f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
@@ -530,9 +538,12 @@ async def do_search(generate_tasks_func, send_cb, user_name, query, details):
     except Exception as e:
         await do_error(send_cb, e)
         raise e
+    finally:
+        await timeoutLock.release()
 
 
-async def validate_bible(send_cb, query, normname, query_user, book_name_user, user_name):
+async def validate_bible(interaction, query, normname, query_user, book_name_user, user_name):
+    send_cb = interaction.edit_original_response
     for book, variants in zip(
         KJV_BOOK_DETAILS,
         [['gen'], ['exo'], ['lev'], ['num'], ['deu'], ['jos'], ['judg', 'jug'], ['rut'], ['1sa'], ['2sa'], ['1ki'], ['2ki'], ['1ch'], ['2ch'], ['ezr'], ['neh'], ['est'], ['job'], ['psa'], ['pro'], ['ecc'], ['son'], ['isa'], ['jer'], ['lam'], ['eze'], ['dan'], ['hos'], ['joe'], ['amo'], ['oba'], ['jon'], [
@@ -552,7 +563,8 @@ async def validate_bible(send_cb, query, normname, query_user, book_name_user, u
     return [{"book_id": selectedbook, "title": selectedbook}]
 
 
-async def validate_egw(send_cb, query, normname, query_user, book_name_user, user_name):
+async def validate_egw(interaction, query, normname, query_user, book_name_user, user_name):
+    send_cb = interaction.edit_original_response
     base_len = len(get_data(query, ""))
     if (base_len > 400):
         await send_cb(content=f'Error: Query result is {base_len-400} characters over the limit. Please refine your search, {user_name}.')
@@ -572,9 +584,9 @@ async def validate_egw(send_cb, query, normname, query_user, book_name_user, use
             if normname == elemtitle:
                 return [elem]
             if normname in elemtitle:
-                candidates.append((elem['book_id'], ['title'], 1))
+                candidates.append((elem, 1))
         if candidates:
-            book_id = await choose_candidates(send_cb, candidates)
+            book_id = await choose_candidates(interaction, candidates)
     if book_id is None:
         candidates = []
         for elem in EGW_BOOK_DETAILS:
@@ -583,37 +595,36 @@ async def validate_egw(send_cb, query, normname, query_user, book_name_user, use
             matches = len(query & elemtitle)
             if matches > 0:
                 candidates.append(
-                    (elem['book_id'], elem['title'], matches + 1 / (len(query) - matches + 1)))
-        book_id = await choose_candidates(send_cb, candidates)
+                    (elem, matches + 1 / (len(query) - matches + 1)))
+        book_id = await choose_candidates(interaction, candidates)
     if book_id is None:
         await send_cb(content='Sorry! no further matching method!')
         return
-    details = [
-        elem for elem in EGW_BOOK_DETAILS if elem['book_id'] == str(book_id)]
+    details = [elem for elem in EGW_BOOK_DETAILS if str(elem['book_id']) == str(book_id)]
     if len(details) < 1:
         await send_cb(content=f'Error: Book id not found, {user_name}.')
         return
     return details[:1]
 
 
-async def do_search_validate(generate_cb, validate_cb, send_cb, user_name, book_name_user: str, query_user: str):
+async def do_search_validate(interaction, generate_cb, validate_cb, book_sep, user_name, book_name_user: str, query_user: str):
     global yes_token_id, no_token_id, timeout_value
-
+    send_cb = interaction.edit_original_response
     should_obey_timeout = str(user_name) not in ['micsthepick']
     # todo better whitelist (don't use str(user_name))!
 
-    if should_obey_timeout:
-        has_acquired_timeout = timeoutLock.try_acquire()
-        if not has_acquired_timeout:
-            await send_cb(content=f"Wait for the current request to finish first, {user_name}!")
-            return
-        can_start_in = timeoutLock.can_start_in()
-        if can_start_in is not None:
-            remaining = (timeout_value - datetime.now()).total_seconds()
-            remaining = int(ceil(max(remaining, 0)))
+    has_acquired_timeout = await timeoutLock.try_acquire()
+    if not has_acquired_timeout:
+        await send_cb(content=f"Wait for the current request to finish first, {user_name}!")
+        return
+
+    can_start_in = await timeoutLock.can_start_in()
+    if can_start_in is not None:
+        if should_obey_timeout:
+            remaining = int(ceil(max(can_start_in.total_seconds(), 0)))
             await send_cb(content=f'Please wait {remaining} seconds before trying again, {user_name}')
-    else:
-        await send_cb(content=f'{user_name} is bypassing the current timeout!')
+        else:
+            await send_cb(content=f'{user_name} is bypassing the current timeout!')
     try:
         async with processingSem:
             # interaction is the context object automatically passed by Twitchio
@@ -622,12 +633,12 @@ async def do_search_validate(generate_cb, validate_cb, send_cb, user_name, book_
             query = normalize_string(query_user)
             normname = normalize_string(book_name_user)
 
-            details = await validate_cb(send_cb, query, normname, query_user, book_name_user, user_name)
+            details = await validate_cb(interaction, query, normname, query_user, book_name_user, user_name)
 
             if details is None:
                 return
 
-            await do_search(generate_cb, send_cb, user_name, query, details)
+            await do_search(interaction, generate_cb, book_sep, user_name, query, details)
             await timeoutLock.start()
     except Exception as e:
         await do_error(send_cb, e)
@@ -640,24 +651,21 @@ async def search(interaction, book_name: str, query: str):
     """Search one book of the bible.
     usage: !search <book> <search query>"""
     user = interaction.user
-    send_cb = interaction.edit_original_response
 
     await interaction.response.send_message("Please wait...")
 
-    await do_search_validate(gen_bible_cb, validate_bible, send_cb, user, book_name, query)
+    await do_search_validate(interaction, gen_bible_cb, validate_bible, ':', user, book_name, query)
 
 
 @bot.tree.command(name='searchegw')
 async def searchegw(interaction, book_name: str, query: str):
     """Search inspired writings.
-    usage: !search <id OR book code>"""
-
+    usage: !search <id OR book code OR ~title>"""
     user = interaction.user
-    send_cb = interaction.edit_original_response
 
     await interaction.response.send_message("Please wait...")
 
-    await do_search_validate(egw_gen_cb, validate_egw, send_cb, user, book_name, query)
+    await do_search_validate(interaction, egw_gen_cb, validate_egw, '-', user, book_name, query)
 
 
 @bot.event
