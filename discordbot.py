@@ -1,10 +1,13 @@
 import asyncio
+import zipfile
 import aiohttp
 from math import ceil
 import aiofiles
 from datetime import datetime, timedelta
-from discord.ext import commands
+import discord
 from discord import Intents
+from discord.ext import commands
+from discord.ui import View, Button
 from tqdm.asyncio import tqdm
 import os
 import json
@@ -17,9 +20,12 @@ import heapq
 # Configuration and Constants
 HUNKSIZE = 1648
 BATCHSIZE = 64
-# used model interaction size should be related to the above with the following eqn:
-# interactionSIZE = BATCHSIZE*(HUNKSIZE/4+400/4), or alternatively HUNKSIZE = 4*interactionSIZE/BATCHSIZE-400
-# (BATCHSIZE = 32, interactionSIZE = 32768 (max), HUNKSIZE = 3696) with HelloBible works well on my RTX 3090 with 24GB VRAM
+# used model interaction size should be related to
+# the above with the following eqn:
+# interactionSIZE = BATCHSIZE*(HUNKSIZE/4+400/4),
+#   or alternatively HUNKSIZE = 4*interactionSIZE/BATCHSIZE-400
+# (BATCHSIZE = 32, interactionSIZE = 32768 (max), HUNKSIZE = 3696
+#   with HelloBible works well on my RTX 3090 with 24GB VRAM)
 
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
@@ -31,7 +37,7 @@ yes_token = "yes"
 no_token = "no"
 tokroute = 'tokenize'
 TOKURL = f"{api}/{tokroute}"
-bot_token =  os.getenv("DISCORD_KEY", None)
+bot_token = os.getenv("DISCORD_KEY", None)
 channel_name = "bible-search"
 
 api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
@@ -42,14 +48,13 @@ bot = commands.Bot(
     command_prefix='!',
 )
 
-# File paths
-file_path = './Bible-kjv/Books.json'
-
 # Headers for the request
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {AUTH}"
 }
+
+
 def get_data(question, hunk):
     return f"""[INST]You're a Christian theology assistant, as far as possible, always refer to the stories in the Bible.
 Determine whether the Bible text is applicable for QUERY:
@@ -63,15 +68,16 @@ Determine whether the Bible text is applicable for QUERY:
 Answer:"""
 
 
-
 async def get_tok(session, tok):
     data = {"content": tok}
     async with session.post(TOKURL, headers=headers, json=data, ssl=False) as response:
         return (await response.json()).get("tokens", [-1])[-1]
 
-async def load_books():
+
+async def load_books(file_path):
     async with aiofiles.open(file_path, 'r') as file:
         return json.loads(await file.read())
+
 
 def get_verses(verses_object):
     """ Generator to yield verse number and text from a chapter. """
@@ -80,6 +86,7 @@ def get_verses(verses_object):
         text = verse.get("text", "Verse text missing!?")
         yield int(vers), text
 
+
 def get_chapters(book_object):
     """ Generator to yield chapter number and verses from a book. """
     for chapter_object in book_object.get("chapters", []):
@@ -87,12 +94,14 @@ def get_chapters(book_object):
         verses_object = chapter_object.get("verses", [])
         yield int(chapt), get_verses(verses_object)
 
-async def get_books(books=None, path="Bible-kjv"):
+
+async def get_kjv_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
     if not books:
-        books = ALL_BOOKS
+        books = [{'book_id': book} for book in KJV_BOOK_DETAILS]
     for book in books:
-        file_path = Path(path).joinpath(f"{book.replace(' ', '')}.json")
+        file_path = Path(path).joinpath(
+            f"{book['book_id'].replace(' ', '')}.json")
         try:
             async with aiofiles.open(file_path, 'r') as file:
                 book_object = json.loads(await file.read())
@@ -100,17 +109,65 @@ async def get_books(books=None, path="Bible-kjv"):
             tqdm.write(f"Error: The file {file_path} does not exist.")
             continue
         except json.JSONDecodeError:
-            tqdm.write(f"Error: The file {file_path} is not a valid JSON file.")
+            tqdm.write(
+                f"Error: The file {file_path} is not a valid JSON file.")
             continue
         yield book, get_chapters(book_object)
+
+
+def get_egw_paragraphs(paras_object, from_pid, to_pid=None):
+    """ Generator to yield verse number and text from a chapter. """
+    started = False
+    for para in paras_object:
+        para_id = para.get("para_id", "???")
+        if para_id == from_pid:
+            started = True
+        elif not started:
+            continue
+        if para_id == to_pid:
+            break
+        text = para.get("content")
+        yield para_id, text
+
+
+def get_egw_chapters(zip_ref: zipfile.ZipFile, index):
+    """ Generator to yield chapter number and verses from a book. """
+    for chapter_object in index:
+        chapt = chapter_object.get("title", "???")
+        para_id = chapter_object.get("para_id")
+        id_next = chapter_object.get("id_next", None)
+        fname = f"{para_id}.json"
+        if fname in set(zi.filename for zi in zip_ref.infolist()):
+            with zip_ref.open(fname, 'r') as para_file:
+                paras_object = json.load(para_file)
+        yield chapt, get_egw_paragraphs(paras_object, from_pid=para_id, to_pid=id_next)
+
+
+async def get_egw_books(books=None, path="egwbooks"):
+    """ Generator to yield book name and its chapters. """
+    if not books:
+        books = EGW_BOOK_DETAILS
+    for book in books:
+        file_path = Path(path).joinpath(f"{book['book_id']}.egwbook")
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                with zip_ref.open('toc.json', 'r') as index_file:
+                    index = json.load(index_file)
+                yield book, get_egw_chapters(zip_ref, index)
+
+        except FileNotFoundError:
+            tqdm.write(f"Error: The file {file_path} does not exist.")
+            continue
+
 
 def get_score(value):
     """ Convert raw score to a human-readable score. """
     return f"{int(1000-round(1000*log(1001-1000*value['score']) / log(1001)))}/1000"
 
-async def generate_tasks(queue, book_filter):
-    book_count = len(book_filter if book_filter else ALL_BOOKS)
-    async for book, book_contents in tqdm(get_books(book_filter), desc="Books: ", total=book_count, leave=False):
+
+async def gen_bible_cb(queue, book_filter):
+    book_count = len(book_filter if book_filter else KJV_BOOK_DETAILS)
+    async for book, book_contents in tqdm(await get_kjv_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
         hunk_start_chapter = 1
         hunk_start_verse = 1
@@ -128,9 +185,31 @@ async def generate_tasks(queue, book_filter):
     tqdm.write('final tasks will finish shortly')
     await queue.put(None)  # Signal the end of the queue
 
+
+async def egw_gen_cb(queue, book_filter):
+    book_count = len(book_filter if book_filter else EGW_BOOK_DETAILS)
+    async for book, book_contents in tqdm(await get_egw_books(book_filter), desc="Books: ", total=book_count, leave=False):
+        hunk = ""
+        hunk_start_chapter = 1
+        hunk_start_para = None
+        async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+            async for para, para_text in tqdm(list(chapter_contents), desc="Paragraphs: ", leave=False):
+                if hunk_start_para is None:
+                    hunk_start_para = para
+                hunk += para_text + '\n'
+                if len(hunk) > HUNKSIZE:
+                    await queue.put((hunk, book, hunk_start_chapter, hunk_start_para, chapter, para))
+                    hunk = ""
+                    hunk_start_chapter = chapter
+                    hunk_start_para = None
+        if hunk:
+            await queue.put((hunk, book, hunk_start_chapter, hunk_start_para, chapter, para))
+
+
 async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results, item, session, question, yes_token_id, no_token_id, topn):
     def append_if_good(results, elem):
-        results[:] = heapq.nlargest(topn, results + [elem], key=lambda x:x['score'])
+        results[:] = heapq.nlargest(
+            topn, results + [elem], key=lambda x: x['score'])
 
     hunk, book, chapter_start, verse_start, chapter_end, verse_end = item
 
@@ -150,7 +229,8 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
         tqdm.write(str(response_json))
         return
 
-    resp_completions = response_json.get("completion_probabilities", [{}])[0].get("probs", None)
+    resp_completions = response_json.get("completion_probabilities", [{}])[
+        0].get("probs", None)
     if not resp_completions:
         tqdm.write("ERR: no completions")
         return
@@ -176,7 +256,7 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
     else:
         score = yes_raw / (yes_raw + no_raw)
 
-    contents_string = f"{book} {chapter_start}:{verse_start}"
+    contents_string = f"{book['title']} {chapter_start}:{verse_start}"
     if chapter_start != chapter_end:
         contents_string += f"-{chapter_end}:{verse_end}"
     elif verse_start != verse_end:
@@ -201,6 +281,7 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
         )
     concurrentTaskLimit.release()
 
+
 async def process(queue, pbar, session, question, yes_token_id, no_token_id, num):
     """ Process items from the queue and send requests to the API. """
     results = []
@@ -208,25 +289,43 @@ async def process(queue, pbar, session, question, yes_token_id, no_token_id, num
     pbarlock = asyncio.Lock()
     concurrentTaskLimit = asyncio.BoundedSemaphore(BATCHSIZE)
     tasks = set()
+    exceptions = []
 
-    while True:
-        item = await queue.get()
+    try:
+        while True:
+            item = await queue.get()
 
-        if item is None:
-            break
+            if item is None:
+                break
 
-        await concurrentTaskLimit.acquire()
-        async with pbarlock:
-            pbar.n += 1
-            pbar.refresh()
-        task = asyncio.create_task(process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results, item, session, question, yes_token_id, no_token_id, num))
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
-    await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+            await concurrentTaskLimit.acquire()
+            async with pbarlock:
+                pbar.n += 1
+                pbar.refresh()
+
+            task = asyncio.create_task(process_and_add_to_scores(
+                pbar, pbarlock, concurrentTaskLimit, results, item, session, question, yes_token_id, no_token_id, num))
+            tasks.add(task)
+
+            # Use task.add_done_callback() to handle exceptions
+            def task_done_callback(task):
+                if task.exception():
+                    exceptions.append(task.exception())
+
+            task.add_done_callback(task_done_callback)
+
+    finally:
+        # Wait for all tasks to complete
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        if exceptions:
+            raise exceptions[0]
+
     return results
 
+
 async def get_tasks_for_selection(queue, selection):
-    async for book, book_contents in get_books([selection['book']]):
+    async for book, book_contents in get_kjv_books([selection['book']]):
         async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
             if chapter < selection['chapter_start']:
                 continue
@@ -240,139 +339,325 @@ async def get_tasks_for_selection(queue, selection):
                 await queue.put((verse_text, book, chapter, verse, chapter, verse))
     await queue.put(None)
 
-class NonBlockingBoundedSemaphore:
-    def __init__(self, permits=1):
-        self._semaphore = asyncio.BoundedSemaphore(permits)
+
+class TimeoutLock:
+    def __init__(self, duration=120):
+        self.release_time = None
+        self.duration = duration
         self._lock = asyncio.Lock()
+        self._waiting = False
 
-    async def try_acquire(self):
+    async def try_acquire(self, ):
         async with self._lock:
-            if self._semaphore._value > 0:
-                await self._semaphore.acquire()
-                return True
-            else:
+            if self._waiting:
                 return False
+            self._waiting = True
+            return True
 
-    def release(self):
-        self._semaphore.release()
+    async def can_start_in(self, newduration=None):
+        async with self._lock:
+            if newduration:
+                self.duration = newduration
+            if self.release_time is None or self.release_time <= datetime.now():
+                return None
+            return self.release_time - datetime.now()
+
+    async def release(self):
+        async with self._lock:
+            self.release_time = None
+
+    async def start(self):
+        async with self._lock:
+            self.release_time = datetime.now() + timedelta(seconds=self.duration)
+
 
 yes_token_id = None
 no_token_id = None
 
 processingSem = asyncio.BoundedSemaphore()
-timeoutSem = NonBlockingBoundedSemaphore()
+timeoutLock = TimeoutLock()
 
 TIMEOUT = 45
 
 
-async def do_search(send_cb, user_name: str, book_name_user: str, query_user: str):
-    global yes_token_id, no_token_id, timeoutSem, timeout_value
+def normalize_string(str):
+    replacements = {v: None for v in '\'"[]<>{}\u2018\u2019\u201c\u201d'} | {
+        v: '-' for v in '_\u2014\u2013'} | {'\u00e9': 'e', '\u00ed': 'i'} | {'\u00a0': ' '}
+    return ' '.join(str.translate(replacements).lower().split()).strip()
 
-    should_obey_timeout = user_name not in ['micsthepick']
-    
-    has_aquired_timeout = await timeoutSem.try_acquire()
-    if has_aquired_timeout:
-        timeout_value = None
-    else:
-        if should_obey_timeout:
-            if timeout_value is None:
-                await send_cb(content=f"Wait for the current request to finish first! @{user_name}")
-                return
-            remaining = (timeout_value-datetime.now()).total_seconds()
-            remaining = int(ceil(max(remaining, 0)))
-            await send_cb(content=f'Please wait {remaining} seconds before trying again, @{user_name}')
+
+async def choose_candidates(send_cb, candidate_list):
+    """takes in: send_cb, a callback to change the reply's message by calling cb(content="") and a list of tuples:
+    each tuple is (book_id, book_title, score),
+    asks the discord user for the chose best candidate, sorted by score,
+    page by page if more than 10 entries,
+    allowing to choose by button."""
+
+    if not candidate_list:
+        return
+
+    candidate_list = sorted(candidate_list, key=lambda x: x[2], reverse=True)
+    per_page = 12
+    page = 0
+
+    selection = asyncio.Future()
+
+    async def update_message(interaction, page):
+        start = page * per_page
+        end = start + per_page
+        candidates = candidate_list[start:end]
+
+        content = "Choose the best candidate:\n"
+        for idx, candidate in enumerate(candidates):
+            content += f"{start + idx + 1}. {candidate[1]} (Score: {candidate[2]})\n"
+
+        buttons = []
+        if page > 0:
+            buttons.append(Button(
+                label="Previous", style=discord.ButtonStyle.primary, custom_id="previous"))
+        if end < len(candidate_list):
+            buttons.append(
+                Button(label="Next", style=discord.ButtonStyle.primary, custom_id="next"))
+
+        for idx in range(len(candidates)):
+            buttons.append(Button(label=str(
+                start + idx + 1), style=discord.ButtonStyle.secondary, custom_id=f"select_{start + idx}"))
+
+        view = View(timeout=None)
+        for button in buttons:
+            view.add_item(button)
+
+        await interaction.response.edit_message(content=content, view=view)
+
+    async def button_callback(interaction):
+        nonlocal page
+        custom_id = interaction.data['custom_id']
+
+        selected_candidate = None
+
+        if custom_id == "previous":
+            page -= 1
+        elif custom_id == "next":
+            page += 1
+        elif custom_id.startswith("select_"):
+            index = int(custom_id.split("_")[1])
+            selected_candidate = candidate_list[index]
+            await send_cb(content=f"Selected candidate: {selected_candidate[1]}")
+            await interaction.response.edit_message(view=None)
+            selection.set_result(selected_candidate)
             return
-        await send_cb(content=f'is bypassing the current timeout!')
+
+        await update_message(interaction, page)
+
+    view = View(timeout=None)
+    for button in [Button(label="Previous", style=discord.ButtonStyle.primary, custom_id="previous"),
+                   Button(label="Next", style=discord.ButtonStyle.primary, custom_id="next")]:
+        view.add_item(button)
+
+    for idx in range(min(per_page, len(candidate_list))):
+        view.add_item(Button(label=str(
+            idx + 1), style=discord.ButtonStyle.secondary, custom_id=f"select_{idx}"))
+
+    view.on_timeout = None
+    view.on_submit = button_callback
+    await send_cb(content="Choose the best candidate:", view=view)
+
+    return await selection
+
+
+def geteid():
+    diff = (datetime.now() - datetime(2020, 1, 1))
+    denom = 131071
+    base = (int(diff.total_seconds()) ^ diff.microseconds) % denom
+    return (((base << 31) % denom) - (base % denom)) % denom
+
+
+async def do_error(send_cb, e):
+    excid = geteid()
+    await send_cb(content=f'An error occurred, please give the following ID to the bot owner: {excid}.')
+    print(f'>>>EXEC {excid}<<<')
+
+
+async def do_search(generate_tasks_func, send_cb, user_name, query, details):
+    global yes_token_id, no_token_id, timeout_value
+    try:
+        print(f'{user_name} requested: ' + query)
+        await send_cb(content=f"Looking through {details[0]['title'] if details else 'everywhere'}. This may take a while!")
+        # only keep 4 requests queued for sending to server (and BATCHSIZE concurrent requests!)
+        queue = asyncio.Queue(4)
+        pbar = tqdm(total=BATCHSIZE, desc="parallel connections:", leave=False)
+        async with aiohttp.ClientSession() as session:
+            if yes_token_id is None:
+                yes_token_id = await get_tok(session, yes_token)
+            if no_token_id is None:
+                no_token_id = await get_tok(session, no_token)
+
+            num_hunks = 3
+            producer = generate_tasks_func(queue, details)
+            consumer = process(queue, pbar, session, query,
+                               yes_token_id, no_token_id, num_hunks)
+            scores = (await asyncio.gather(*[producer, consumer]))[1]
+            pbar.close()
+
+            print(f'Scores accumulated. Sending Best {len(scores)}')
+            contents = []
+            no_results = True
+            for selection in scores:
+                if selection["score"] < 0.875:
+                    break
+                await asyncio.sleep(0.125)
+                # server load protection, otherwise llama.cpp kicks
+                no_results = False
+                contents.append(
+                    f"found: {selection['ref']}, score {get_score(selection)}")
+                await send_cb(content="\n".join(contents))
+                num_verses = 3
+                producer = get_tasks_for_selection(queue, selection)
+                pbar = tqdm(total=BATCHSIZE,
+                            desc="parallel connections:", leave=False)
+                consumer = process(queue, pbar, session, query,
+                                   yes_token_id, no_token_id, num_verses)
+                scores = (await asyncio.gather(*[producer, consumer]))[1]
+                best_verse = scores[0]
+                contents.append(
+                    f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
+                await send_cb(content="\n".join(contents))
+                pbar.close()
+            if no_results or not scores:
+                print('no good results')
+                await send_cb(content='nothing relevant.')
+        print(f'finished request for {user_name}.')
+    except Exception as e:
+        await do_error(send_cb, e)
+        raise e
+
+
+async def validate_bible(send_cb, query, normname, query_user, book_name_user, user_name):
+    for book, variants in zip(
+        KJV_BOOK_DETAILS,
+        [['gen'], ['exo'], ['lev'], ['num'], ['deu'], ['jos'], ['judg', 'jug'], ['rut'], ['1sa'], ['2sa'], ['1ki'], ['2ki'], ['1ch'], ['2ch'], ['ezr'], ['neh'], ['est'], ['job'], ['psa'], ['pro'], ['ecc'], ['son'], ['isa'], ['jer'], ['lam'], ['eze'], ['dan'], ['hos'], ['joe'], ['amo'], ['oba'], ['jon'], [
+            'mic'], ['nah'], ['hab'], ['zep'], ['hag'], ['zec'], ['mal'], ['mat'], ['mar'], ['luk'], ['joh'], ['act'], ['rom'], ['1co'], ['2co'], ['gal'], ['eph'], ['phi'], ['col'], ['1th'], ['2th'], ['1ti'], ['2ti'], ['tit'], ['phi'], ['heb'], ['jam'], ['1pe'], ['2pe'], ['1jo'], ['2jo'], ['3jo'], ['jude'], ['rev']]
+    ):
+        if any(normname.startswith(v) for v in variants):
+            selectedbook = book
+            break
+    else:
+        await send_cb(content=f'Error: I do not recognise the book: "{book_name_user}" {user_name}.')
+        return
+    # validate args:
+    base_len = len(get_data(query, ""))
+    if (base_len > 400):
+        await send_cb(content=f'Error: Query result is {base_len-400} characters over the limit. Please refine your search, {user_name}.')
+        return
+    return [{"book_id": selectedbook, "title": selectedbook}]
+
+
+async def validate_egw(send_cb, query, normname, query_user, book_name_user, user_name):
+    base_len = len(get_data(query, ""))
+    if (base_len > 400):
+        await send_cb(content=f'Error: Query result is {base_len-400} characters over the limit. Please refine your search, {user_name}.')
+        return
+    book_id = None
+    try:
+        book_id = int(normname)
+    except ValueError:
+        pass
+    if book_id is None:
+        candidates = []
+        for elem in EGW_BOOK_DETAILS:
+            elemcodes = elem['code'].lower().split('/')
+            if normname in elemcodes:
+                return [elem]
+            elemtitle = normalize_string(elem['title'])
+            if normname == elemtitle:
+                return [elem]
+            if normname in elemtitle:
+                candidates.append((elem['book_id'], ['title'], 1))
+        if candidates:
+            book_id = await choose_candidates(send_cb, candidates)
+    if book_id is None:
+        candidates = []
+        for elem in EGW_BOOK_DETAILS:
+            elemtitle = set(normalize_string(elem['title']).split(' '))
+            query = set(normname.split(' '))
+            matches = len(query & elemtitle)
+            if matches > 0:
+                candidates.append(
+                    (elem['book_id'], elem['title'], matches + 1 / (len(query) - matches + 1)))
+        book_id = await choose_candidates(send_cb, candidates)
+    if book_id is None:
+        await send_cb(content='Sorry! no further matching method!')
+        return
+    details = [
+        elem for elem in EGW_BOOK_DETAILS if elem['book_id'] == str(book_id)]
+    if len(details) < 1:
+        await send_cb(content=f'Error: Book id not found, {user_name}.')
+        return
+    return details[:1]
+
+
+async def do_search_validate(generate_cb, validate_cb, send_cb, user_name, book_name_user: str, query_user: str):
+    global yes_token_id, no_token_id, timeout_value
+
+    should_obey_timeout = str(user_name) not in ['micsthepick']
+    # todo better whitelist (don't use str(user_name))!
+
+    if should_obey_timeout:
+        has_acquired_timeout = timeoutLock.try_acquire()
+        if not has_acquired_timeout:
+            await send_cb(content=f"Wait for the current request to finish first, {user_name}!")
+            return
+        can_start_in = timeoutLock.can_start_in()
+        if can_start_in is not None:
+            remaining = (timeout_value - datetime.now()).total_seconds()
+            remaining = int(ceil(max(remaining, 0)))
+            await send_cb(content=f'Please wait {remaining} seconds before trying again, {user_name}')
+    else:
+        await send_cb(content=f'{user_name} is bypassing the current timeout!')
     try:
         async with processingSem:
             # interaction is the context object automatically passed by Twitchio
             # Parse the command message
             # parse args
-            query = ' '.join(query_user.split()).translate({v:None for v in '[]<>{}'})
+            query = normalize_string(query_user)
+            normname = normalize_string(book_name_user)
 
-            normname = book_name_user.strip().replace(' ', '').lower()
-            for book, variants in zip(
-                ALL_BOOKS,
-                [['gen'], ['exo'], ['lev'], ['num'], ['deu'], ['jos'], ['judg', 'jug'], ['rut'], ['1sa'], ['2sa'], ['1ki'], ['2ki'], ['1ch'], ['2ch'], ['ezr'], ['neh'], ['est'], ['job'], ['psa'], ['pro'], ['ecc'], ['son'], ['isa'], ['jer'], ['lam'], ['eze'], ['dan'], ['hos'], ['joe'], ['amo'], ['oba'], ['jon'], ['mic'], ['nah'], ['hab'], ['zep'], ['hag'], ['zec'], ['mal'], ['mat'], ['mar'], ['luk'], ['joh'], ['act'], ['rom'], ['1co'], ['2co'], ['gal'], ['eph'], ['phi'], ['col'], ['1th'], ['2th'], ['1ti'], ['2ti'], ['tit'], ['phi'], ['heb'], ['jam'], ['1pe'], ['2pe'], ['1jo'], ['2jo'], ['3jo'], ['jude'], ['rev']]
-            ):
-                if any(normname.startswith(v) for v in variants):
-                    selectedbook = book
-                    break
-            else:
-                await send_cb(content=f'Error: I do not recognise the book: "{book_name_user} @{user_name}"')
+            details = await validate_cb(send_cb, query, normname, query_user, book_name_user, user_name)
+
+            if details is None:
                 return
 
-            # validate args:
-            base_len = len(get_data(query, ""))
-            if (base_len > 400):
-                await send_cb(content=f'Error: Query result is {base_len-400} characters over the limit. Please refine your search. @{user_name}')
-                return
-
-            try:
-                print(f'{user_name} requested: ' + query)
-                await send_cb(content=f'I think you wanted to look through {selectedbook} - Searching! This may take a while!')
-                queue = asyncio.Queue(4) # only keep 4 requests queued for sending to server (and BATCHSIZE concurrent requests!)
-                pbar = tqdm(total=BATCHSIZE, desc="parallel connections:", leave=False)
-                async with aiohttp.ClientSession() as session:
-                    if yes_token_id is None:
-                        yes_token_id = await get_tok(session, yes_token)
-                    if no_token_id is None:
-                        no_token_id = await get_tok(session, no_token)
-
-                    num_hunks = 3
-                    producer = generate_tasks(queue, [selectedbook])
-                    consumer = process(queue, pbar, session, query, yes_token_id, no_token_id, num_hunks)
-                    scores = (await asyncio.gather(*[producer, consumer]))[1]
-                    pbar.close()
-
-                    print(f'Scores accumulated. Sending Best {len(scores)}')
-                    contents = []
-                    no_results = True
-                    for selection in scores:
-                        if selection["score"] < 0.875:
-                            break
-                        await asyncio.sleep(0.125)
-                        # server load protection, otherwise llama.cpp kicks
-                        no_results = False
-                        contents.append(f"found: {selection['ref']}, score {get_score(selection)}")
-                        await send_cb(content="\n".join(contents))
-                        num_verses = 3
-                        producer = get_tasks_for_selection(queue, selection)
-                        pbar = tqdm(total=BATCHSIZE, desc="parallel connections:", leave=False)
-                        consumer = process(queue, pbar, session, query, yes_token_id, no_token_id, num_verses)
-                        scores = (await asyncio.gather(*[producer, consumer]))[1]
-                        best_verse = scores[0]
-                        contents.append(f"top verse: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
-                        await send_cb(content="\n".join(contents))
-                        pbar.close()
-                    if no_results:
-                        print('no good results')
-                        await send_cb(content=f'nothing relevant.')
-                    if not scores:
-                        print('no results')
-                        await send_cb(content=f'sorry, something wrong happened and I can not seem to find anything!')
-                print(f'finished request for {user_name}')
-            except Exception as e:
-                await send_cb(content=f'OWW, don\'t you love it when you encounter: {e}.')
-            timeout_value = datetime.now() + timedelta(seconds=TIMEOUT)
-            await asyncio.sleep(TIMEOUT)
-    finally:
-        if has_aquired_timeout:
-            timeoutSem.release()
+            await do_search(generate_cb, send_cb, user_name, query, details)
+            await timeoutLock.start()
+    except Exception as e:
+        await do_error(send_cb, e)
+        raise e
 
 
 # Command to handle searching
 @bot.tree.command(name='search')
 async def search(interaction, book_name: str, query: str):
-    """search one book of the bible.
+    """Search one book of the bible.
     usage: !search <book> <search query>"""
     user = interaction.user
     send_cb = interaction.edit_original_response
 
     await interaction.response.send_message("Please wait...")
 
-    await do_search(send_cb, user, book_name, query)
+    await do_search_validate(gen_bible_cb, validate_bible, send_cb, user, book_name, query)
 
+
+@bot.tree.command(name='searchegw')
+async def searchegw(interaction, book_name: str, query: str):
+    """Search inspired writings.
+    usage: !search <id OR book code>"""
+
+    user = interaction.user
+    send_cb = interaction.edit_original_response
+
+    await interaction.response.send_message("Please wait...")
+
+    await do_search_validate(egw_gen_cb, validate_egw, send_cb, user, book_name, query)
 
 
 @bot.event
@@ -381,12 +666,24 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
 
 try:
-    ALL_BOOKS = asyncio.run(load_books())
+    kjv_details_path = './Bible-kjv/Books.json'
+    KJV_BOOK_DETAILS = asyncio.run(load_books(kjv_details_path))
 except FileNotFoundError:
-    print(f"Error: The file {file_path} does not exist.")
+    print(f"Error: The file {kjv_details_path} does not exist.")
     sys.exit(1)
 except json.JSONDecodeError:
-    print(f"Error: The file {file_path} is not a valid JSON file.")
+    print(f"Error: The file {kjv_details_path} is not a valid JSON file.")
+    sys.exit(1)
+
+try:
+    egw_details_path = './egwbooks/books.json'
+    EGW_BOOK_DETAILS = asyncio.run(load_books(egw_details_path))
+except FileNotFoundError:
+    print(f"Error: The file {egw_details_path} does not exist. "
+          "(have you imported the .egwbooks and run egw_extractor.py?)")
+    sys.exit(1)
+except json.JSONDecodeError:
+    print(f"Error: The file {egw_details_path} is not a valid JSON file.")
     sys.exit(1)
 
 # Run the bot

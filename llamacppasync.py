@@ -13,9 +13,12 @@ import heapq
 # Configuration and Constants
 HUNKSIZE = 3696
 BATCHSIZE = 32
-# used model ctx size should be related to the above with the following eqn:
-# CTXSIZE = BATCHSIZE*(HUNKSIZE/4+400/4), or alternatively HUNKSIZE = 4*CTXSIZE/BATCHSIZE-400
-# (BATCHSIZE = 32, CTXSIZE = 32768 (max), HUNKSIZE = 3696) with HelloBible works well on my RTX 3090 with 24GB VRAM
+# used model interaction size should be related to
+# the above with the following eqn:
+# interactionSIZE = BATCHSIZE*(HUNKSIZE/4+400/4),
+#   or alternatively HUNKSIZE = 4*interactionSIZE/BATCHSIZE-400
+# (BATCHSIZE = 32, interactionSIZE = 32768 (max), HUNKSIZE = 3696
+#   with HelloBible works well on my RTX 3090 with 24GB VRAM)
 
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
@@ -36,6 +39,8 @@ headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {AUTH}"
 }
+
+
 def get_data(question, hunk):
     return f"""[INST]You're a Christian theology assistant, as far as possible, always refer to the stories in the Bible.
 Determine whether the Bible text is applicable for QUERY:[/INST]
@@ -48,14 +53,17 @@ Determine whether the Bible text is applicable for QUERY:[/INST]
 [/QUERY]
 Answer:"""
 
+
 async def get_tok(session, tok):
     data = {"content": tok}
     async with session.post(TOKURL, headers=headers, json=data, ssl=False) as response:
         return (await response.json()).get("tokens", [-1])[-1]
 
+
 async def load_books():
     async with aiofiles.open(file_path, 'r') as file:
         return json.loads(await file.read())
+
 
 def get_verses(verses_object):
     """ Generator to yield verse number and text from a chapter. """
@@ -64,12 +72,14 @@ def get_verses(verses_object):
         text = verse.get("text", "Verse text missing!?")
         yield int(vers), text
 
+
 def get_chapters(book_object):
     """ Generator to yield chapter number and verses from a book. """
     for chapter_object in book_object.get("chapters", []):
         chapt = chapter_object.get("chapter", "???")
         verses_object = chapter_object.get("verses", [])
         yield int(chapt), get_verses(verses_object)
+
 
 async def get_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
@@ -84,13 +94,16 @@ async def get_books(books=None, path="Bible-kjv"):
             tqdm.write(f"Error: The file {file_path} does not exist.")
             continue
         except json.JSONDecodeError:
-            tqdm.write(f"Error: The file {file_path} is not a valid JSON file.")
+            tqdm.write(
+                f"Error: The file {file_path} is not a valid JSON file.")
             continue
         yield book, get_chapters(book_object)
+
 
 def get_score(value):
     """ Convert raw score to a human-readable score. """
     return f"{int(1000-round(1000*log(1001-1000*value) / log(1001)))}/1000"
+
 
 async def generate_tasks(queue, book_filter):
     book_count = len(book_filter if book_filter else ALL_BOOKS)
@@ -112,12 +125,13 @@ async def generate_tasks(queue, book_filter):
     tqdm.write('final tasks will finish shortly')
     await queue.put(None)  # Signal the end of the queue
 
+
 async def process(queue, session, question, yes_token_id, no_token_id, topn=25):
     """ Process items from the queue and send requests to the API. """
     results = []
 
     def append_if_good(results, elem, topn=topn):
-        return heapq.nlargest(topn, results + [elem], key=lambda x:x['score'])
+        return heapq.nlargest(topn, results + [elem], key=lambda x: x['score'])
 
     while True:
         item = await queue.get()
@@ -142,7 +156,8 @@ async def process(queue, session, question, yes_token_id, no_token_id, topn=25):
             tqdm.write(str(response_json))
             continue
 
-        resp_completions = response_json.get("completion_probabilities", [{}])[0].get("probs", None)
+        resp_completions = response_json.get("completion_probabilities", [{}])[
+            0].get("probs", None)
         if not resp_completions:
             tqdm.write("ERR: no completions")
             continue
@@ -191,6 +206,7 @@ async def process(queue, session, question, yes_token_id, no_token_id, topn=25):
 
     return results
 
+
 async def get_tasks_for_selection(queue, selection):
     async for book, book_contents in get_books([selection['book']]):
         async for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
@@ -206,6 +222,7 @@ async def get_tasks_for_selection(queue, selection):
                 await queue.put((verse_text, book, chapter, verse, chapter, verse))
     await queue.put(None)
 
+
 async def main():
     queue = asyncio.Queue(BATCHSIZE)
 
@@ -217,7 +234,8 @@ async def main():
     no_token_id = None
 
     while True:
-        question = input('Search Query (e.g. question or biblical statement): ')
+        question = input(
+            'Search Query (e.g. question or biblical statement): ')
 
         base_len = len(get_data(question, ""))
 
@@ -232,19 +250,23 @@ async def main():
                 no_token_id = await get_tok(session, no_token)
 
             producer = generate_tasks(queue, book_filter)
-            consumer = process(queue, session, question, yes_token_id, no_token_id, 5)
+            consumer = process(queue, session, question,
+                               yes_token_id, no_token_id, 5)
             scores = (await asyncio.gather(*[producer, consumer]))[1]
-            
+
             print(f'Scores accumulated. Best {len(scores)} hunks to follow')
             # already sorted by heapq
-            print('\n'.join([f"{get_score(obj['score'])}: {obj['ref']}" for obj in scores]))
+            print(
+                '\n'.join([f"{get_score(obj['score'])}: {obj['ref']}" for obj in scores]))
             for selection in scores:
                 print(f"Selecting hunk: {selection['ref']}")
                 nv = 3
                 producer = get_tasks_for_selection(queue, selection)
-                consumer = process(queue, session, question, yes_token_id, no_token_id, nv)
+                consumer = process(queue, session, question,
+                                   yes_token_id, no_token_id, nv)
                 scores = (await asyncio.gather(*[producer, consumer]))[1]
-                print(f"Best {len(scores)} verses from hunk in {selection['book']}:")
+                print(
+                    f"Best {len(scores)} verses from hunk in {selection['book']}:")
                 for obj in scores:
                     text = obj['verse']
                     score = get_score(obj['score'])
