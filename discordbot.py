@@ -543,7 +543,7 @@ async def do_search(interaction, generate_tasks_func, book_sep, user_name, query
         await do_error(send_cb, e)
         raise e
     finally:
-        await timeoutLock.finish()
+        await timeoutLock.finished()
 
 
 async def validate_bible(interaction, query, normname, query_user, book_name_user, user_name):
