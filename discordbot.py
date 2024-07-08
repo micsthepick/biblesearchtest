@@ -79,7 +79,7 @@ async def load_books(file_path):
         return json.loads(await file.read())
 
 
-def get_verses(verses_object):
+def get_bible_verses(verses_object):
     """ Generator to yield verse number and text from a chapter. """
     for verse in verses_object:
         vers = verse.get("verse", "???")
@@ -87,15 +87,15 @@ def get_verses(verses_object):
         yield int(vers), text
 
 
-def get_chapters(book_object):
+def get_bible_chapters(book_object):
     """ Generator to yield chapter number and verses from a book. """
     for chapter_object in book_object.get("chapters", []):
         chapt = chapter_object.get("chapter", "???")
         verses_object = chapter_object.get("verses", [])
-        yield int(chapt), get_verses(verses_object)
+        yield int(chapt), get_bible_verses(verses_object)
 
 
-def get_kjv_books(books=None, path="Bible-kjv"):
+def get_bible_books(books=None, path="Bible-kjv"):
     """ Generator to yield book name and its chapters. """
     if not books:
         books = [{'book_id': book} for book in KJV_BOOK_DETAILS]
@@ -112,7 +112,7 @@ def get_kjv_books(books=None, path="Bible-kjv"):
             tqdm.write(
                 f"Error: The file {file_path} is not a valid JSON file.")
             continue
-        yield book, get_chapters(book_object)
+        yield book, get_bible_chapters(book_object)
 
 
 def get_egw_paragraphs(paras_object, from_pid, to_pid=None):
@@ -163,9 +163,9 @@ def get_score(value):
     return f"{int(1000-round(1000*log(1001-1000*value['score']) / log(1001)))}/1000"
 
 
-async def gen_bible_cb(queue, book_filter):
+async def bible_gen_cb(queue, book_filter):
     book_count = len(book_filter if book_filter else KJV_BOOK_DETAILS)
-    for book, book_contents in tqdm(get_kjv_books(book_filter), desc="Books: ", total=book_count, leave=False):
+    for book, book_contents in tqdm(get_bible_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
         hunk_start_chapter = 1
         hunk_start_verse = 1
@@ -325,7 +325,14 @@ async def process(queue, pbar, session, question, book_sep, yes_token_id, no_tok
 
 
 async def get_tasks_for_selection(queue, generate_cb, selection):
-    for book, book_contents in generate_cb(queue, [selection['book']]):
+    # TODO unjank
+    if generate_cb is egw_gen_cb:
+        text_generator = get_egw_books
+    elif generate_cb is bible_gen_cb:
+        text_generator = get_bible_books
+    else:
+        raise ValueError("bad callback")
+    for book, book_contents in text_generator([selection['book']]):
         for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
             if chapter < selection['chapter_start']:
                 continue
@@ -496,7 +503,7 @@ async def do_search(interaction, generate_cb, book_sep, user_name, query, detail
         print(f'{user_name} requested: ' + query)
         await send_cb(content=f"Looking through {details[0]['title'] if details else 'everywhere'}. This may take a while!")
         # only keep 4 requests queued for sending to server (and BATCHSIZE concurrent requests!)
-        queue = asyncio.Queue(4)
+        queue = asyncio.Queue(2)
         pbar = tqdm(total=BATCHSIZE, desc="parallel connections:", leave=False)
         async with aiohttp.ClientSession() as session:
             if yes_token_id is None:
@@ -658,7 +665,7 @@ async def search(interaction, book_name: str, query: str):
 
     await interaction.response.send_message("Please wait...")
 
-    await do_search_validate(interaction, gen_bible_cb, validate_bible, ':', user, book_name, query)
+    await do_search_validate(interaction, bible_gen_cb, validate_bible, ':', user, book_name, query)
 
 
 @bot.tree.command(name='searchegw')
