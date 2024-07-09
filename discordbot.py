@@ -18,14 +18,14 @@ import heapq
 
 
 # Configuration and Constants
-HUNKSIZE = 1648
-BATCHSIZE = 64
+HUNKSIZE = 15984
+BATCHSIZE = 8
 # used model interaction size should be related to
 # the above with the following eqn:
-# interactionSIZE = BATCHSIZE*(HUNKSIZE/4+400/4),
-#   or alternatively HUNKSIZE = 4*interactionSIZE/BATCHSIZE-400
-# (BATCHSIZE = 32, interactionSIZE = 32768 (max), HUNKSIZE = 3696
-#   with HelloBible works well on my RTX 3090 with 24GB VRAM)
+# CTXSIZE = BATCHSIZE*(HUNKSIZE/4+400/4),
+#   or alternatively HUNKSIZE = 4*CTXSIZE/BATCHSIZE-400
+# (BATCHSIZE = 8, CTXSIZE = 32768 (max), HUNKSIZE = 15984
+#   with HelloBiblev0.2 works well on my RTX 3090 with 24GB VRAM)
 
 testing_key = 'Password12344321'
 AUTH = os.getenv("OPENAI_AI_KEY", testing_key)
@@ -542,7 +542,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
     global yes_token_id, no_token_id
     send_cb = interaction.edit_original_response
     try:
-        print(f'{user_name} requested: ' + query)
+        print(f'{user_name} requested: {query} in {details[0]["title"]}')
         await send_cb(content=f"Looking through {details[0]['title'] if details else 'everywhere'}. This may take a while!")
         # only keep BATCHSIZE concurrent requests!
         pbar = tqdm(total=BATCHSIZE, desc="queue progress", leave=False)
