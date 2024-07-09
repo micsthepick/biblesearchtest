@@ -163,7 +163,7 @@ def get_score(value):
     return f"{int(1000-round(1000*log(1001-1000*value['score']) / log(1001)))}/1000"
 
 
-async def bible_gen_cb(queue, book_filter):
+async def bible_gen_cb(book_filter):
     book_count = len(book_filter if book_filter else KJV_BOOK_DETAILS)
     for book, book_contents in tqdm(get_bible_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
@@ -173,18 +173,15 @@ async def bible_gen_cb(queue, book_filter):
             for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
                 hunk += verse_text + '\n'
                 if len(hunk) > HUNKSIZE:
-                    await queue.put((hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse))
+                    yield (hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse)
                     hunk = ""
                     hunk_start_chapter = chapter
                     hunk_start_verse = verse + 1
         if hunk:
-            await queue.put((hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse))
-
-    tqdm.write('final tasks will finish shortly')
-    await queue.put(None)  # Signal the end of the queue
+            yield (hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse)
 
 
-async def egw_gen_cb(queue, book_filter):
+async def egw_gen_cb(book_filter):
     book_count = len(book_filter if book_filter else EGW_BOOK_DETAILS)
     for book, book_contents in tqdm(get_egw_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
@@ -196,14 +193,12 @@ async def egw_gen_cb(queue, book_filter):
                     hunk_start_para = para
                 hunk += para_text + '\n'
                 if len(hunk) > HUNKSIZE:
-                    await queue.put((hunk, book, hunk_start_chapter, hunk_start_para, chapter, para))
+                    yield (hunk, book, hunk_start_chapter, hunk_start_para, chapter, para)
                     hunk = ""
                     hunk_start_chapter = chapter
                     hunk_start_para = None
         if hunk:
-            await queue.put((hunk, book, hunk_start_chapter, hunk_start_para, chapter, para))
-
-    await queue.put(None)  # Signal the end of the queue
+            yield (hunk, book, hunk_start_chapter, hunk_start_para, chapter, para)
 
 
 async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results, item, session, question, book_sep, yes_token_id, no_token_id, topn):
@@ -282,8 +277,8 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
     concurrentTaskLimit.release()
 
 
-async def process(queue, pbar, session, question, book_sep, yes_token_id, no_token_id, num):
-    """ Process items from the queue and send requests to the API. """
+async def process(gen_obj, pbar, session, question, book_sep, yes_token_id, no_token_id, num):
+    """ Process items from the generator and send requests to the API. """
     results = []
 
     pbarlock = asyncio.Lock()
@@ -297,12 +292,7 @@ async def process(queue, pbar, session, question, book_sep, yes_token_id, no_tok
             exceptions.append(task.exception())
 
     try:
-        while True:
-            item = await queue.get()
-
-            if item is None:
-                break
-
+        async for item in gen_obj:
             await concurrentTaskLimit.acquire()
             async with pbarlock:
                 pbar.n += 1
@@ -343,7 +333,7 @@ async def send_safe(interaction: discord.Interaction, message, limit=1900):
         await interaction.followup.send(' '.join(next_message))
 
 
-async def get_tasks_for_selection(queue, generate_cb, selection):
+async def get_tasks_for_selection(generate_cb, selection):
     # TODO unjank
     if generate_cb is egw_gen_cb:
         text_generator = get_egw_books
@@ -362,8 +352,7 @@ async def get_tasks_for_selection(queue, generate_cb, selection):
                     continue
                 elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
                     break
-                await queue.put((verse_text, book, chapter, verse, chapter, verse))
-    await queue.put(None)
+                yield (verse_text, book, chapter, verse, chapter, verse)
 
 
 class TimeoutLock:
@@ -521,8 +510,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
     try:
         print(f'{user_name} requested: ' + query)
         await send_cb(content=f"Looking through {details[0]['title'] if details else 'everywhere'}. This may take a while!")
-        # only keep 4 requests queued for sending to server (and BATCHSIZE concurrent requests!)
-        queue = asyncio.Queue(2)
+        # only keep BATCHSIZE concurrent requests!
         pbar = tqdm(total=BATCHSIZE, desc="parallel connections:", leave=False)
         async with aiohttp.ClientSession() as session:
             if yes_token_id is None:
@@ -531,10 +519,11 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                 no_token_id = await get_tok(session, no_token)
 
             num_hunks = 3
-            producer = generate_cb(queue, details)
-            consumer = process(queue, pbar, session, query, book_sep,
-                               yes_token_id, no_token_id, num_hunks)
-            scores = (await asyncio.gather(producer, consumer))[1]
+            producer = generate_cb(details)
+            scores = await process(
+                producer, pbar, session, query,
+                book_sep, yes_token_id, no_token_id,
+                num_hunks)
             pbar.close()
 
             print(f'Scores accumulated. Sending Best {len(scores)}')
@@ -547,12 +536,13 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                 no_results = False
                 await send_safe(interaction, f"found: {selection['ref']}, score {get_score(selection)}")
                 num_verses = 3
-                producer = get_tasks_for_selection(queue, generate_cb, selection)
+                producer = get_tasks_for_selection(generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
                             desc="parallel connections:", leave=False)
-                consumer = process(queue, pbar, session, query, book_sep,
-                                   yes_token_id, no_token_id, num_verses)
-                scores = (await asyncio.gather(producer, consumer))[1]
+                scores = await process(
+                    producer, pbar, session, query,
+                    book_sep, yes_token_id, no_token_id,
+                    num_verses)
                 best_verse = scores[0]
                 await send_safe(interaction, f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
                 pbar.close()
