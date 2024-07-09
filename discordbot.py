@@ -553,7 +553,7 @@ async def do_search(interaction, generate_cb, book_sep, user_name, query, detail
                                    yes_token_id, no_token_id, num_verses)
                 scores = (await asyncio.gather(producer, consumer))[1]
                 best_verse = scores[0]
-                send_safe(interaction, f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
+                await send_safe(interaction, f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
                 pbar.close()
             if no_results or not scores:
                 print('no good results')
