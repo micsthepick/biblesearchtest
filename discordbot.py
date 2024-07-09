@@ -324,6 +324,24 @@ async def process(queue, pbar, session, question, book_sep, yes_token_id, no_tok
     return results
 
 
+async def send_safe(interaction: discord.Interaction, message, limit=1900):
+    words = message.split(' ')
+    next_message = []
+    for word in words:
+        if len(word) > limit:
+            await interaction.followup.send(' '.join(next_message))
+            n = 1 + (len(word) - 1) // limit
+            next_words = [word[i:i + limit] for i in range(0, len(word), n)]
+            for word in next_words[:-1]:
+                await interaction.followup.send(word)
+            next_message = next_words[-1]
+        elif len(' '.join(next_message + [word])) > limit:
+            await interaction.followup.send(' '.join(next_message))
+            next_message = [word]
+    if next_message:
+        await interaction.followup.send(' '.join(next_message))
+
+
 async def get_tasks_for_selection(queue, generate_cb, selection):
     # TODO unjank
     if generate_cb is egw_gen_cb:
@@ -489,10 +507,10 @@ def geteid():
     return (((base << 31) % denom) - (base % denom)) % denom
 
 
-async def do_error(send_cb, e):
+async def do_error(interaction: discord.Interaction, e: Exception):
     print(e)
     excid = geteid()
-    await send_cb(content=f'An error occurred, please give the following ID to the bot owner: {excid}.')
+    await interaction.followup.send(content=f'An error occurred, please give the following ID to the bot owner: {excid}.')
     print(f'>>>EXEC {excid}<<<')
 
 
@@ -519,7 +537,6 @@ async def do_search(interaction, generate_cb, book_sep, user_name, query, detail
             pbar.close()
 
             print(f'Scores accumulated. Sending Best {len(scores)}')
-            contents = []
             no_results = True
             for selection in scores:
                 if selection["score"] < 0.875:
@@ -527,9 +544,7 @@ async def do_search(interaction, generate_cb, book_sep, user_name, query, detail
                 await asyncio.sleep(0.125)
                 # server load protection, otherwise llama.cpp kicks
                 no_results = False
-                contents.append(
-                    f"found: {selection['ref']}, score {get_score(selection)}")
-                await send_cb(content="\n".join(contents))
+                await send_safe(interaction, f"found: {selection['ref']}, score {get_score(selection)}")
                 num_verses = 3
                 producer = get_tasks_for_selection(queue, generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
@@ -538,16 +553,14 @@ async def do_search(interaction, generate_cb, book_sep, user_name, query, detail
                                    yes_token_id, no_token_id, num_verses)
                 scores = (await asyncio.gather(producer, consumer))[1]
                 best_verse = scores[0]
-                contents.append(
-                    f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
-                await send_cb(content="\n".join(contents))
+                send_safe(interaction, f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
                 pbar.close()
             if no_results or not scores:
                 print('no good results')
-                await send_cb(content='nothing relevant.')
+                await send_safe(interaction, 'nothing relevant.')
         print(f'finished request for {user_name}.')
     except Exception as e:
-        await do_error(send_cb, e)
+        await do_error(interaction, e)
         raise e
     finally:
         await timeoutLock.finished()
@@ -609,11 +622,11 @@ async def validate_egw(interaction, query, normname, query_user, book_name_user,
                     (elem, matches + 1 / (len(query) - matches + 1)))
         book_id = await choose_candidates(interaction, candidates)
     if book_id is None:
-        await send_cb(content='Sorry! no further matching method!')
+        await send_safe(interaction, 'Sorry! no further matching method!')
         return
     details = [elem for elem in EGW_BOOK_DETAILS if str(elem['book_id']) == str(book_id)]
     if len(details) < 1:
-        await send_cb(content=f'Error: Book id not found, {user_name}.')
+        await send_safe(interaction, f'Error: Book id not found, {user_name}.')
         return
     return details[:1]
 
@@ -652,7 +665,7 @@ async def do_search_validate(interaction, generate_cb, validate_cb, book_sep, us
             await do_search(interaction, generate_cb, book_sep, user_name, query, details)
             await timeoutLock.start()
     except Exception as e:
-        await do_error(send_cb, e)
+        await do_error(interaction, e)
         raise e
 
 
@@ -676,7 +689,7 @@ async def searchegw(interaction, book_name: str, query: str):
 
     await interaction.response.send_message("Please wait...")
 
-    await do_search_validate(interaction, egw_gen_cb, validate_egw, '-', user, book_name, query)
+    await do_search_validate(interaction, egw_gen_cb, validate_egw, '.', user, book_name, query)
 
 
 @bot.event
