@@ -338,6 +338,7 @@ async def send_safe(interaction: discord.Interaction, message, limit=1900):
         elif len(' '.join(next_message + [word])) > limit:
             await interaction.followup.send(' '.join(next_message))
             next_message = [word]
+        next_message.append(word)
     if next_message:
         await interaction.followup.send(' '.join(next_message))
 
@@ -514,7 +515,7 @@ async def do_error(interaction: discord.Interaction, e: Exception):
     print(f'>>>EXEC {excid}<<<')
 
 
-async def do_search(interaction, generate_cb, book_sep, user_name, query, details):
+async def do_search(interaction: discord.Interaction, generate_cb, book_sep, user_name, query, details):
     global yes_token_id, no_token_id
     send_cb = interaction.edit_original_response
     try:
