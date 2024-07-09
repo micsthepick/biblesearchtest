@@ -45,8 +45,8 @@ api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
 
 class LockWithFuture(asyncio.Lock):
     def __init__(self):
-        super().__init__()
         self.future = None
+        super().__init__()
 
     def add_future(self):
         """should be called after aquiring the lock"""
@@ -61,12 +61,12 @@ class LockWithFuture(asyncio.Lock):
         except AttributeError:
             return
 
-    def resolve_future(self, value=None):
+    def try_resolve_future(self, value=None):
         try:
             self.future.set_result(value)
             self.future = None
         except AttributeError:
-            raise ValueError('Getting future of LockWithFuture before add_future!')
+            pass
 
 
 class TimeoutLock:
@@ -336,7 +336,7 @@ async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, result
                 "verse_end": verse_end
             }
         )
-        pbarlock.resolve_future()
+        pbarlock.try_resolve_future()
 
 
 async def process(gen_obj, pbar, session, question, book_sep, yes_token_id, no_token_id, num):
