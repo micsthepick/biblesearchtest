@@ -42,6 +42,68 @@ channel_name = "bible-search"
 
 api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
 
+
+class LockWithFuture(asyncio.Lock):
+    def __init__(self):
+        super().__init__()
+        self.future = None
+
+    def add_future(self):
+        """should be called after aquiring the lock"""
+        if self.future is None:
+            self.future = asyncio.Future()
+        else:
+            raise ValueError('Setting future of LockWithFuture twice!')
+
+    async def try_get_future(self):
+        try:
+            return await self.future
+        except AttributeError:
+            return
+
+    def resolve_future(self, value=None):
+        try:
+            self.future.set_result(value)
+            self.future = None
+        except AttributeError:
+            raise ValueError('Getting future of LockWithFuture before add_future!')
+
+
+class TimeoutLock:
+    def __init__(self, duration=120):
+        self.release_time = None
+        self.duration = duration
+        self._lock = asyncio.Lock()
+        self._waiting = False
+
+    async def try_acquire(self, ):
+        async with self._lock:
+            if self._waiting:
+                return False
+            self._waiting = True
+            return True
+
+    async def finished(self):
+        async with self._lock:
+            self._waiting = False
+
+    async def can_start_in(self, newduration=None):
+        async with self._lock:
+            if newduration:
+                self.duration = newduration
+            if self.release_time is None or self.release_time <= datetime.now():
+                return None
+            return self.release_time - datetime.now()
+
+    async def release(self):
+        async with self._lock:
+            self.release_time = None
+
+    async def start(self):
+        async with self._lock:
+            self.release_time = datetime.now() + timedelta(seconds=self.duration)
+
+
 # Twitch bot setup
 bot = commands.Bot(
     intents=Intents(messages=True),
@@ -201,7 +263,7 @@ async def egw_gen_cb(book_filter):
             yield (hunk, book, hunk_start_chapter, hunk_start_para, chapter, para)
 
 
-async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results, item, session, question, book_sep, yes_token_id, no_token_id, topn):
+async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, results, item, session, question, book_sep, yes_token_id, no_token_id, topn):
     def append_if_good(results, elem):
         results[:] = heapq.nlargest(
             topn, results + [elem], key=lambda x: x['score'])
@@ -258,7 +320,7 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
         contents_string += f"-{verse_end}"
 
     async with pbarlock:
-        pbar.n -= 1
+        pbar.n += 1
         pbar.refresh()
         results = append_if_good(
             results,
@@ -274,36 +336,40 @@ async def process_and_add_to_scores(pbar, pbarlock, concurrentTaskLimit, results
                 "verse_end": verse_end
             }
         )
-    concurrentTaskLimit.release()
+        pbarlock.resolve_future()
 
 
 async def process(gen_obj, pbar, session, question, book_sep, yes_token_id, no_token_id, num):
     """ Process items from the generator and send requests to the API. """
     results = []
 
-    pbarlock = asyncio.Lock()
-    concurrentTaskLimit = asyncio.BoundedSemaphore(BATCHSIZE)
-    tasks = []
+    pbarlock = LockWithFuture()
+    tasks = set()
     exceptions = []
 
     # Use task.add_done_callback() to handle exceptions
     def task_done_callback(task):
         if task.exception():
             exceptions.append(task.exception())
+        tasks.discard(task)
+        del task
 
     try:
         async for item in gen_obj:
-            await concurrentTaskLimit.acquire()
+            waiting = False
             async with pbarlock:
-                pbar.n += 1
+                pbar.n -= 1
                 pbar.refresh()
-
+                if pbar.n == 0:
+                    pbarlock.add_future()
+                    waiting = True
+            if waiting:
+                await pbarlock.try_get_future()
             task = asyncio.create_task(process_and_add_to_scores(
-                pbar, pbarlock, concurrentTaskLimit, results, item, session,
+                pbar, pbarlock, results, item, session,
                 question, book_sep, yes_token_id, no_token_id, num))
-            tasks.append(task)
+            tasks.add(task)
             task.add_done_callback(task_done_callback)
-
     finally:
         # Wait for all tasks to complete
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -353,41 +419,6 @@ async def get_tasks_for_selection(generate_cb, selection):
                 elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
                     break
                 yield (verse_text, book, chapter, verse, chapter, verse)
-
-
-class TimeoutLock:
-    def __init__(self, duration=120):
-        self.release_time = None
-        self.duration = duration
-        self._lock = asyncio.Lock()
-        self._waiting = False
-
-    async def try_acquire(self, ):
-        async with self._lock:
-            if self._waiting:
-                return False
-            self._waiting = True
-            return True
-
-    async def finished(self):
-        async with self._lock:
-            self._waiting = False
-
-    async def can_start_in(self, newduration=None):
-        async with self._lock:
-            if newduration:
-                self.duration = newduration
-            if self.release_time is None or self.release_time <= datetime.now():
-                return None
-            return self.release_time - datetime.now()
-
-    async def release(self):
-        async with self._lock:
-            self.release_time = None
-
-    async def start(self):
-        async with self._lock:
-            self.release_time = datetime.now() + timedelta(seconds=self.duration)
 
 
 yes_token_id = None
@@ -498,6 +529,9 @@ def geteid():
 
 
 async def do_error(interaction: discord.Interaction, e: Exception):
+    if hasattr(e, 'has_been_returned_via_discord') and e.has_been_returned_via_discord:
+        return
+    e.has_been_returned_via_discord = True
     print(e)
     excid = geteid()
     await interaction.followup.send(content=f'An error occurred, please give the following ID to the bot owner: {excid}.')
@@ -511,7 +545,8 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
         print(f'{user_name} requested: ' + query)
         await send_cb(content=f"Looking through {details[0]['title'] if details else 'everywhere'}. This may take a while!")
         # only keep BATCHSIZE concurrent requests!
-        pbar = tqdm(total=BATCHSIZE, desc="parallel connections:", leave=False)
+        pbar = tqdm(total=BATCHSIZE, desc="queue progress", leave=False)
+        pbar.n = BATCHSIZE
         async with aiohttp.ClientSession() as session:
             if yes_token_id is None:
                 yes_token_id = await get_tok(session, yes_token)
@@ -534,17 +569,17 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                 await asyncio.sleep(0.125)
                 # server load protection, otherwise llama.cpp kicks
                 no_results = False
-                await send_safe(interaction, f"found: {selection['ref']}, score {get_score(selection)}")
                 num_verses = 3
                 producer = get_tasks_for_selection(generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
                             desc="parallel connections:", leave=False)
+                pbar.n = BATCHSIZE
                 scores = await process(
                     producer, pbar, session, query,
                     book_sep, yes_token_id, no_token_id,
                     num_verses)
                 best_verse = scores[0]
-                await send_safe(interaction, f"top ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
+                await send_safe(interaction, f"found: {selection['ref']}, score {get_score(selection)}\n\ntop ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
                 pbar.close()
             if no_results or not scores:
                 print('no good results')
