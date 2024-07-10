@@ -569,7 +569,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                     break 
                 await asyncio.sleep(0.125)
                 # server load protection, otherwise llama.cpp kicks
-                num_verses = 5
+                num_verses = 3
                 producer = get_tasks_for_selection(generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
                             desc="queue progress", leave=False)
@@ -583,6 +583,8 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                         break
                     no_results = False
                     bs4text = BeautifulSoup(best_verse['verse'], features="html.parser").get_text()
+                    await asyncio.sleep(0.5)
+                    # rate limit the verse output
                     await send_safe(
                         interaction,
                         f"""found: {selection['ref']}, score {get_score(selection)}
