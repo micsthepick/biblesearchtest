@@ -19,12 +19,12 @@ from bs4 import BeautifulSoup
 
 
 # Configuration and Constants
-HUNKSIZE = 15984
+HUNKSIZE = 11888
 BATCHSIZE = 8
 # used model interaction size should be related to
 # the above with the following eqn:
 # CTXSIZE = BATCHSIZE*(HUNKSIZE/4+400/4),
-#   or alternatively HUNKSIZE = 4*CTXSIZE/BATCHSIZE-400
+#   or alternatively HUNKSIZE = 3*CTXSIZE/BATCHSIZE-400
 # (BATCHSIZE = 8, CTXSIZE = 32768 (max), HUNKSIZE = 15984
 #   with HelloBiblev0.2 works well on my RTX 3090 with 24GB VRAM)
 
@@ -554,13 +554,15 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
             if no_token_id is None:
                 no_token_id = await get_tok(session, no_token)
 
-            num_hunks = 4
+            num_hunks = 8
             producer = generate_cb(details)
             scores = await process(
                 producer, pbar, session, query,
                 book_sep, yes_token_id, no_token_id,
                 num_hunks)
             pbar.close()
+
+            returned_limit = 5
 
             print(f'Scores accumulated. Sending Best {len(scores)}')
             no_results = True
@@ -579,9 +581,12 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                     book_sep, yes_token_id, no_token_id,
                     num_verses)
                 for best_verse in scores:
-                    if selection["score"] < 0.5:
+                    if best_verse["score"] < 0.5:
                         break
                     no_results = False
+                    returned_limit -= 1
+                    if not returned_limit:
+                        break
                     bs4text = BeautifulSoup(best_verse['verse'], features="html.parser").get_text()
                     await asyncio.sleep(0.5)
                     # rate limit the verse output
@@ -590,6 +595,8 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                         f"""in chunk: {selection['ref']}, score {get_score(selection)}
 THIS PARTICULAR VERSE: ref: {best_verse['ref']}, score: {get_score(best_verse)}, {bs4text}""")
                 pbar.close()
+                if not returned_limit:
+                    break
             if no_results or not scores:
                 print('no good results')
                 await send_safe(interaction, 'nothing relevant.')
