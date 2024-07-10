@@ -587,13 +587,14 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                     # rate limit the verse output
                     await send_safe(
                         interaction,
-                        f"""found: {selection['ref']}, score {get_score(selection)}
-
-top ref: {best_verse['ref']}, {get_score(best_verse)}, {bs4text}""")
+                        f"""in chunk: {selection['ref']}, score {get_score(selection)}
+THIS PARTICULAR VERSE: ref: {best_verse['ref']}, score: {get_score(best_verse)}, {bs4text}""")
                 pbar.close()
             if no_results or not scores:
                 print('no good results')
                 await send_safe(interaction, 'nothing relevant.')
+            else:
+                await send_safe(interaction, "no further results.")
         print(f'finished request for {user_name}.')
     except Exception as e:
         await do_error(interaction, e)
