@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from math import log
 import heapq
+from bs4 import BeautifulSoup
 
 
 # Configuration and Constants
@@ -104,7 +105,7 @@ class TimeoutLock:
             self.release_time = datetime.now() + timedelta(seconds=self.duration)
 
 
-# Twitch bot setup
+# Twitch bot setupF
 bot = commands.Bot(
     intents=Intents(messages=True),
     command_prefix='!',
@@ -553,7 +554,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
             if no_token_id is None:
                 no_token_id = await get_tok(session, no_token)
 
-            num_hunks = 3
+            num_hunks = 10
             producer = generate_cb(details)
             scores = await process(
                 producer, pbar, session, query,
@@ -565,11 +566,11 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
             no_results = True
             for selection in scores:
                 if selection["score"] < 0.875:
-                    break
+                    break 
                 await asyncio.sleep(0.125)
                 # server load protection, otherwise llama.cpp kicks
                 no_results = False
-                num_verses = 3
+                num_verses = 5
                 producer = get_tasks_for_selection(generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
                             desc="parallel connections:", leave=False)
@@ -579,7 +580,12 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                     book_sep, yes_token_id, no_token_id,
                     num_verses)
                 best_verse = scores[0]
-                await send_safe(interaction, f"found: {selection['ref']}, score {get_score(selection)}\n\ntop ref: {best_verse['ref']}, {get_score(best_verse)}, " + ' '.join(best_verse['verse'].split('\n')))
+                bs4text = BeautifulSoup(best_verse['verse'], features="html.parser").get_text()
+                await send_safe(
+                    interaction,
+                    f"""found: {selection['ref']}, score {get_score(selection)}
+
+top ref: {best_verse['ref']}, {get_score(best_verse)}, {bs4text}""")
                 pbar.close()
             if no_results or not scores:
                 print('no good results')
@@ -686,11 +692,13 @@ async def do_search_validate(interaction, generate_cb, validate_cb, book_sep, us
             details = await validate_cb(interaction, query, normname, query_user, book_name_user, user_name)
 
             if details is None:
+                await timeoutLock.finished()
                 return
 
             await do_search(interaction, generate_cb, book_sep, user_name, query, details)
             await timeoutLock.start()
     except Exception as e:
+        await timeoutLock.finished()
         await do_error(interaction, e)
         raise e
 
