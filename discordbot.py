@@ -573,7 +573,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                 num_verses = 5
                 producer = get_tasks_for_selection(generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
-                            desc="parallel connections:", leave=False)
+                            desc="queue progress", leave=False)
                 pbar.n = BATCHSIZE
                 scores = await process(
                     producer, pbar, session, query,
@@ -602,8 +602,12 @@ async def validate_bible(interaction, query, normname, query_user, book_name_use
     send_cb = interaction.edit_original_response
     for book, variants in zip(
         KJV_BOOK_DETAILS,
-        [['gen'], ['exo'], ['lev'], ['num'], ['deu'], ['jos'], ['judg', 'jug'], ['rut'], ['1sa'], ['2sa'], ['1ki'], ['2ki'], ['1ch'], ['2ch'], ['ezr'], ['neh'], ['est'], ['job'], ['psa'], ['pro'], ['ecc'], ['son'], ['isa'], ['jer'], ['lam'], ['eze'], ['dan'], ['hos'], ['joe'], ['amo'], ['oba'], ['jon'], [
-            'mic'], ['nah'], ['hab'], ['zep'], ['hag'], ['zec'], ['mal'], ['mat'], ['mar'], ['luk'], ['joh'], ['act'], ['rom'], ['1co'], ['2co'], ['gal'], ['eph'], ['phi'], ['col'], ['1th'], ['2th'], ['1ti'], ['2ti'], ['tit'], ['phi'], ['heb'], ['jam'], ['1pe'], ['2pe'], ['1jo'], ['2jo'], ['3jo'], ['jude'], ['rev']]
+        [['gen'], ['exo'], ['lev'], ['num'], ['deu'], ['jos'], ['judg', 'jug'], ['rut'], ['1sa', '1 sa'], ['2sa', '2 sa'], ['1ki', '1 ki'], ['2ki', '2 ki'],
+         ['1ch', '1 ch'], ['2ch', '2 ch'], ['ezr'], ['neh'], ['est'], ['job'], ['psa'], ['pro'], ['ecc'], ['son'], ['isa'], ['jer'], ['lam'], ['eze'], ['dan'],
+         ['hos'], ['joe'], ['amo'], ['oba'], ['jon'], ['mic'], ['nah'], ['hab'], ['zep'], ['hag'], ['zec'], ['mal'],
+         ['mat'], ['mar'], ['luk'], ['joh'], ['act'], ['rom'], ['1co', '1 co'], ['2co', '2 co'], ['gal'], ['eph'], ['phi'],
+         ['col'], ['1th', '1 th'], ['2th', '2 th'], ['1ti', '1 ti'], ['2ti', '2 ti'], ['tit'], ['phi'], ['heb'], ['jam'],
+         ['1pe', '1 pe'], ['2pe', '2 pe'], ['1jo', '1 jo'], ['2jo', '2 jo'], ['3jo', '3 jo'], ['jude'], ['rev']]
     ):
         if any(normname.startswith(v) for v in variants):
             selectedbook = book
