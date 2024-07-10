@@ -554,7 +554,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
             if no_token_id is None:
                 no_token_id = await get_tok(session, no_token)
 
-            num_hunks = 10
+            num_hunks = 4
             producer = generate_cb(details)
             scores = await process(
                 producer, pbar, session, query,
@@ -569,7 +569,6 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                     break 
                 await asyncio.sleep(0.125)
                 # server load protection, otherwise llama.cpp kicks
-                no_results = False
                 num_verses = 5
                 producer = get_tasks_for_selection(generate_cb, selection)
                 pbar = tqdm(total=BATCHSIZE,
@@ -579,11 +578,14 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                     producer, pbar, session, query,
                     book_sep, yes_token_id, no_token_id,
                     num_verses)
-                best_verse = scores[0]
-                bs4text = BeautifulSoup(best_verse['verse'], features="html.parser").get_text()
-                await send_safe(
-                    interaction,
-                    f"""found: {selection['ref']}, score {get_score(selection)}
+                for best_verse in scores:
+                    if selection["score"] < 0.5:
+                        break
+                    no_results = False
+                    bs4text = BeautifulSoup(best_verse['verse'], features="html.parser").get_text()
+                    await send_safe(
+                        interaction,
+                        f"""found: {selection['ref']}, score {get_score(selection)}
 
 top ref: {best_verse['ref']}, {get_score(best_verse)}, {bs4text}""")
                 pbar.close()
