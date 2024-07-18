@@ -147,7 +147,7 @@ def get_bible_verses(verses_object):
     for verse in verses_object:
         vers = verse.get("verse", "???")
         text = verse.get("text", "Verse text missing!?")
-        yield int(vers), text
+        yield vers, text
 
 
 def get_bible_chapters(book_object):
@@ -155,7 +155,7 @@ def get_bible_chapters(book_object):
     for chapter_object in book_object.get("chapters", []):
         chapt = chapter_object.get("chapter", "???")
         verses_object = chapter_object.get("verses", [])
-        yield int(chapt), get_bible_verses(verses_object)
+        yield chapt, get_bible_verses(verses_object)
 
 
 def get_bible_books(books=None, path="Bible-kjv"):
@@ -181,7 +181,7 @@ def get_bible_books(books=None, path="Bible-kjv"):
 def get_egw_paragraphs(paras_object, from_pid, to_pid=None):
     """ Generator to yield verse number and text from a chapter. """
     started = False
-    for para_num, para in enumerate(paras_object):
+    for para in paras_object:
         para_id = para.get("para_id", "???")
         if para_id == from_pid:
             started = True
@@ -190,19 +190,24 @@ def get_egw_paragraphs(paras_object, from_pid, to_pid=None):
         if para_id == to_pid:
             break
         text = para.get("content")
-        yield para_num + 1, text
+        refcode_2 = para.get('refcode_2', '')
+        refcode_3 = para.get('refcode_3', '')
+        refcode_4 = para.get('refcode_4', False)
+        if refcode_4:
+            continue
+        yield (refcode_2, refcode_3), text
 
 
 def get_egw_chapters(zip_ref: zipfile.ZipFile, index):
     """ Generator to yield chapter number and verses from a book."""
-    for chapt, chapter_object in enumerate(index):
+    for chapter_object in index:
         para_id = chapter_object.get("para_id")
         id_next = chapter_object.get("id_next", None)
         fname = f"{para_id}.json"
         if fname in set(zi.filename for zi in zip_ref.infolist()):
             with zip_ref.open(fname, 'r') as para_file:
                 paras_object = json.load(para_file)
-        yield chapt + 1, get_egw_paragraphs(paras_object, from_pid=para_id, to_pid=id_next)
+        yield get_egw_paragraphs(paras_object, from_pid=para_id, to_pid=id_next)
 
 
 def get_egw_books(books=None, path="egwbooks"):
@@ -230,38 +235,54 @@ async def bible_gen_cb(book_filter):
     book_count = len(book_filter if book_filter else KJV_BOOK_DETAILS)
     for book, book_contents in tqdm(get_bible_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
-        hunk_start_chapter = 1
-        hunk_start_verse = 1
+        hunk_start_chapter = None
+        hunk_start_verse = None
         for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
             for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
+                if hunk_start_verse is None:
+                    hunk_start_verse = verse
+                    hunk_start_chapter = chapter
                 hunk += verse_text + '\n'
                 if len(hunk) > HUNKSIZE:
                     yield (hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse)
                     hunk = ""
-                    hunk_start_chapter = chapter
-                    hunk_start_verse = verse + 1
+                    hunk_start_chapter = None
+                    hunk_start_verse = None
         if hunk:
             yield (hunk, book, hunk_start_chapter, hunk_start_verse, chapter, verse)
+            hunk = ""
+            hunk_start_chapter = None
+            hunk_start_verse = None
 
 
 async def egw_gen_cb(book_filter):
     book_count = len(book_filter if book_filter else EGW_BOOK_DETAILS)
     for book, book_contents in tqdm(get_egw_books(book_filter), desc="Books: ", total=book_count, leave=False):
         hunk = ""
-        hunk_start_chapter = 1
+        hunk_start_chapter = None
         hunk_start_para = None
-        for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
-            for para, para_text in tqdm(list(chapter_contents), desc="Paragraphs: ", leave=False):
+        for chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+            for (chapter, para), para_text in tqdm(list(chapter_contents), desc="Paragraphs: ", leave=False):
                 if hunk_start_para is None:
                     hunk_start_para = para
+                    hunk_start_chapter = chapter
+                if chapter != hunk_start_chapter:
+                    if hunk:
+                        yield (hunk, book, hunk_start_chapter, hunk_start_para, chapter, para)
+                    hunk = ""
+                    hunk_start_chapter = None
+                    hunk_start_para = None
                 hunk += para_text + '\n'
                 if len(hunk) > HUNKSIZE:
                     yield (hunk, book, hunk_start_chapter, hunk_start_para, chapter, para)
                     hunk = ""
-                    hunk_start_chapter = chapter
+                    hunk_start_chapter = None
                     hunk_start_para = None
         if hunk:
             yield (hunk, book, hunk_start_chapter, hunk_start_para, chapter, para)
+            hunk = ""
+            hunk_start_chapter = None
+            hunk_start_para = None
 
 
 async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, results, item, session, question, book_sep, yes_token_id, no_token_id, topn):
@@ -401,26 +422,36 @@ async def send_safe(interaction: discord.Interaction, message, limit=1900):
 
 
 async def get_tasks_for_selection(generate_cb, selection):
-    # TODO unjank
     if generate_cb is egw_gen_cb:
-        text_generator = get_egw_books
+        for book, book_contents in get_egw_books([selection['book']]):
+            recording = False
+            stopping = False
+            for chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+                for (chapter, para), paragraph_contents in tqdm(list(chapter_contents), desc="Paragraphs: ", leave=False):
+                    if para == selection['verse_start'] and chapter == selection['chapter_start']:
+                        recording = True
+                    if recording:
+                        yield (paragraph_contents, book, chapter, para, chapter, para)
+                    if para == selection['verse_end'] and chapter == selection['chapter_end']:
+                        stopping = True
+                        break
+                if stopping:
+                    break
     elif generate_cb is bible_gen_cb:
-        text_generator = get_bible_books
+        for book, book_contents in get_bible_books([selection['book']]):
+            for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
+                if chapter < selection['chapter_start']:
+                    continue
+                elif chapter > selection['chapter_end']:
+                    break
+                for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
+                    if chapter == selection['chapter_start'] and verse < selection['verse_start']:
+                        continue
+                    elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
+                        break
+                    yield (verse_text, book, chapter, verse, chapter, verse)
     else:
         raise ValueError("bad callback")
-    for book, book_contents in text_generator([selection['book']]):
-        for chapter, chapter_contents in tqdm(list(book_contents), desc="Chapters: ", leave=False):
-            if chapter < selection['chapter_start']:
-                continue
-            elif chapter > selection['chapter_end']:
-                break
-            for verse, verse_text in tqdm(list(chapter_contents), desc="Verses: ", leave=False):
-                if chapter == selection['chapter_start'] and verse < selection['verse_start']:
-                    continue
-                elif chapter == selection['chapter_end'] and verse > selection['verse_end']:
-                    break
-                yield (verse_text, book, chapter, verse, chapter, verse)
-
 
 yes_token_id = None
 no_token_id = None
@@ -548,7 +579,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
         # only keep BATCHSIZE concurrent requests!
         pbar = tqdm(total=BATCHSIZE, desc="queue progress", leave=False)
         pbar.n = BATCHSIZE
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             if yes_token_id is None:
                 yes_token_id = await get_tok(session, yes_token)
             if no_token_id is None:
@@ -568,7 +599,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
             no_results = True
             for selection in scores:
                 if selection["score"] < 0.875:
-                    break 
+                    break
                 await asyncio.sleep(0.125)
                 # server load protection, otherwise llama.cpp kicks
                 num_verses = 3
