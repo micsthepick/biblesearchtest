@@ -308,8 +308,8 @@ async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, result
         tqdm.write(str(response_json))
         return
 
-    resp_completions = response_json.get("completion_probabilities", [{}])[
-        0].get("probs", None)
+    resp_completions = response_json.get(
+        "completion_probabilities", [{}])[0].get("probs", None)
     if not resp_completions:
         tqdm.write("ERR: no completions")
         return

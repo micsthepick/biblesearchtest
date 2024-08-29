@@ -4,7 +4,6 @@ import aiofiles
 from tqdm.asyncio import tqdm
 import os
 import json
-import sys
 from math import log
 import heapq
 
