@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 
 # Configuration and Constants
 HUNKSIZE = 11888
-BATCHSIZE = 8
+BATCHSIZE = 32
 # used model interaction size should be related to
 # the above with the following eqn:
 # CTXSIZE = BATCHSIZE*(HUNKSIZE/4+400/4),
