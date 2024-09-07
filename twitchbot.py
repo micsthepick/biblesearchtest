@@ -28,8 +28,8 @@ testing_api = "http://127.0.0.1:8080"
 api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
 route = "completion"
 URL = f"{api}/{route}"
-yes_token = "yes"
-no_token = "no"
+yes_token = " yes"
+no_token = " no"
 tokroute = 'tokenize'
 TOKURL = f"{api}/{tokroute}"
 bot_username = os.getenv("TWITCH_USER", "")
@@ -57,22 +57,24 @@ headers = {
 
 
 def get_data(question, hunk):
-    return f"""[INST]You're a Christian theology assistant, as far as possible, always refer to the stories in the Bible.
-Determine whether the Bible text is applicable for QUERY:
-[TEXT]
+    return f"""System: Determine whether the provided text is applicable for answering the provided question.
+
+(Your Answer Must be yes or no).
+[BEGIN TEXT]
 {hunk}
-[/TEXT]
-(Your Answer Must be 'yes' or 'no' without quotes)
-[QUERY]
-{question}
-[/QUERY][/INST]
-Answer:"""
+[END TEXT]
+
+User: {question}
+
+Assistant:"""
 
 
 async def get_tok(session, tok):
     data = {"content": tok}
     async with session.post(TOKURL, headers=headers, json=data, ssl=False) as response:
-        return (await response.json()).get("tokens", [-1])[-1]
+        toks = (await response.json()).get("tokens", [-1])
+        print(f'"{tok}" tokens: {toks}')
+        return [-1]
 
 
 async def load_books():

@@ -34,8 +34,8 @@ testing_api = "http://127.0.0.1:8080"
 api = os.getenv("OPENAI_API_ENDPOINT", testing_api)
 route = "completion"
 URL = f"{api}/{route}"
-yes_token = "yes"
-no_token = "no"
+yes_tokens = [" yes", "yes", " Yes", "Yes"]
+no_tokens = [" no", "no", " No", "No"]
 tokroute = 'tokenize'
 TOKURL = f"{api}/{tokroute}"
 bot_token = os.getenv("DISCORD_KEY", None)
@@ -119,22 +119,25 @@ headers = {
 
 
 def get_data(question, hunk):
-    return f"""[INST]You're a Christian theology assistant, as far as possible, always refer to the stories in the Bible.
-Determine whether the Bible text is applicable for QUERY:
-[TEXT]
+    return f"""System: As far as possible, refer to the stories in the bible. Determine whether the provided text is applicable for answering the provided query.
+[BEGIN TEXT]
 {hunk}
-[/TEXT]
-(Your Answer Must be 'yes' or 'no' without quotes)
-[QUERY]
-{question}
-[/QUERY][/INST]
-Answer:"""
+[END TEXT]
+
+User: Does this bible text help to find answers to {question}
+
+Assistant:"""
 
 
-async def get_tok(session, tok):
-    data = {"content": tok}
-    async with session.post(TOKURL, headers=headers, json=data, ssl=False) as response:
-        return (await response.json()).get("tokens", [-1])[-1]
+async def get_tok(session, toks):
+    tokIds = set()
+    for tok in toks:
+        data = {"content": tok}
+        async with session.post(TOKURL, headers=headers, json=data, ssl=False) as response:
+            toks = (await response.json()).get("tokens", [-1])
+            print(f'"{tok}" tokens: {toks}')
+            tokIds.add(toks[0])
+    return tokIds
 
 
 async def load_books(file_path):
@@ -285,7 +288,7 @@ async def egw_gen_cb(book_filter):
             hunk_start_para = None
 
 
-async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, results, item, session, question, book_sep, yes_token_id, no_token_id, topn):
+async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, results, item, session, question, book_sep, yes_token_ids, no_token_ids, topn):
     def append_if_good(results, elem):
         results[:] = heapq.nlargest(
             topn, results + [elem], key=lambda x: x['score'])
@@ -296,12 +299,14 @@ async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, result
         "prompt": get_data(question, hunk),
         "temperature": -1,
         "n_predict": 1,
-        "logit_bias": [[i, False] for i in range(256 * 256) if i not in [yes_token_id, no_token_id]],
-        "n_probs": 2,
+        "logit_bias": [[i, False] for i in range(256 * 256) if i not in yes_token_ids | no_token_ids],
+        "n_probs": 20,
         "add_bos_token": True,
         "samplers": []
     }
     async with session.post(URL, headers=headers, json=data, ssl=False) as response:
+        del data["logit_bias"]
+        print(response, data)
         response_json = await response.json()
 
     if not isinstance(response_json, dict) or 'err' in response_json or 'error' in response_json:
@@ -310,6 +315,7 @@ async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, result
 
     resp_completions = response_json.get(
         "completion_probabilities", [{}])[0].get("probs", None)
+
     if not resp_completions:
         tqdm.write("ERR: no completions")
         return
@@ -320,15 +326,10 @@ async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, result
     for tok in resp_completions:
         if not isinstance(tok, dict):
             break
-        if tok.get("tok_str", "").strip() == yes_token.strip():
-            yes_raw = tok.get('prob', 0)
-        elif tok.get("tok_str", "").strip() == no_token.strip():
-            no_raw = tok.get('prob', 0)
-
-    if yes_raw is None:
-        yes_raw = 0
-    if no_raw is None:
-        no_raw = 0
+        if tok.get("tok_str") in yes_tokens:
+            yes_raw += tok.get('prob')
+        elif tok.get("tok_str") in no_tokens:
+            no_raw += tok.get('prob')
 
     if (yes_raw + no_raw) == 0:
         score = 0
@@ -361,7 +362,7 @@ async def process_and_add_to_scores(pbar: tqdm, pbarlock: LockWithFuture, result
         pbarlock.try_resolve_future()
 
 
-async def process(gen_obj, pbar, session, question, book_sep, yes_token_id, no_token_id, num):
+async def process(gen_obj, pbar, session, question, book_sep, yes_token_ids, no_token_ids, num):
     """ Process items from the generator and send requests to the API. """
     results = []
 
@@ -389,7 +390,7 @@ async def process(gen_obj, pbar, session, question, book_sep, yes_token_id, no_t
                 await pbarlock.try_get_future()
             task = asyncio.create_task(process_and_add_to_scores(
                 pbar, pbarlock, results, item, session,
-                question, book_sep, yes_token_id, no_token_id, num))
+                question, book_sep, yes_token_ids, no_token_ids, num))
             tasks.add(task)
             task.add_done_callback(task_done_callback)
     finally:
@@ -453,8 +454,8 @@ async def get_tasks_for_selection(generate_cb, selection):
     else:
         raise ValueError("bad callback")
 
-yes_token_id = None
-no_token_id = None
+yes_token_ids = set()
+no_token_ids = set()
 
 processingSem = asyncio.BoundedSemaphore()
 timeoutLock = TimeoutLock()
@@ -571,7 +572,7 @@ async def do_error(interaction: discord.Interaction, e: Exception):
 
 
 async def do_search(interaction: discord.Interaction, generate_cb, book_sep, user_name, query, details):
-    global yes_token_id, no_token_id
+    global yes_token_ids, no_token_ids
     send_cb = interaction.edit_original_response
     try:
         print(f'{user_name} requested: {query} in {details[0]["title"]}')
@@ -580,10 +581,10 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
         pbar = tqdm(total=BATCHSIZE, desc="queue progress", leave=False)
         pbar.n = BATCHSIZE
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
-            if yes_token_id is None:
-                yes_token_id = await get_tok(session, yes_token)
-            if no_token_id is None:
-                no_token_id = await get_tok(session, no_token)
+            if len(yes_token_ids) == 0:
+                yes_token_id = await get_tok(session, yes_tokens)
+            if len(no_token_ids) == 0:
+                no_token_id = await get_tok(session, no_tokens)
 
             num_hunks = 8
             producer = generate_cb(details)
@@ -600,7 +601,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
             for selection in scores:
                 if selection["score"] < 0.875:
                     break
-                await asyncio.sleep(0.125)
+                await asyncio.sleep(0.5)
                 # server load protection, otherwise llama.cpp kicks
                 num_verses = 3
                 producer = get_tasks_for_selection(generate_cb, selection)
@@ -609,7 +610,7 @@ async def do_search(interaction: discord.Interaction, generate_cb, book_sep, use
                 pbar.n = BATCHSIZE
                 scores = await process(
                     producer, pbar, session, query,
-                    book_sep, yes_token_id, no_token_id,
+                    book_sep, yes_token_id, no_token_ids,
                     num_verses)
                 for best_verse in scores:
                     if best_verse["score"] < 0.5:
@@ -711,7 +712,7 @@ async def validate_egw(interaction, query, normname, query_user, book_name_user,
 
 
 async def do_search_validate(interaction, generate_cb, validate_cb, book_sep, user_name, book_name_user: str, query_user: str):
-    global yes_token_id, no_token_id, timeout_value
+    global yes_token_ids, no_token_ids, timeout_value
     send_cb = interaction.edit_original_response
     should_obey_timeout = str(user_name) not in ['micsthepick']
     # todo better whitelist (don't use str(user_name))!
