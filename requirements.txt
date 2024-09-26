@@ -1,3 +1,6 @@
 tqdm
 asyncio
 aiofiles
+aiohttp
+discord
+beautifulsoup4
